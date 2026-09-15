@@ -323,7 +323,11 @@ class WindowAFDConnector(AFDConnectorBase):
                 getter = getattr(self.process_group, "get_hccl_comm_name", None)
             if getter is None:
                 raise RuntimeError("HCCL ProcessGroup does not expose comm name API")
-            self.hccl_comm_name = str(getter(self.world_rank))
+            # ``get_hccl_comm_name`` selects the communicator for the current
+            # local device from this argument.  Window's ``world_rank`` spans
+            # both A/F roles, while the process only exposes its local NPU
+            # ordinals through ``ASCEND_RT_VISIBLE_DEVICES``.
+            self.hccl_comm_name = str(getter(self.local_rank))
 
             self.window_size = (
                 self.attn_window_size
