@@ -68,8 +68,9 @@ class WindowAFDTransferState(AFDTransferState):
 class WindowAFDExtraInfo(ConnectorExtraInfo):
     """Window protocol options.
 
-    The current implementation requires one micro-batch. Scheduling is
-    lock-step or independent per Attention session according to ``async_dp``.
+    Window supports one stage (U1) or two request-boundary stages (U2).
+    Scheduling is lock-step or independent per Attention session according to
+    ``async_dp``; U2 currently uses the eager lock-step path.
     """
 
     micro_batch_num: int = 1
@@ -259,10 +260,15 @@ class WindowAFDConnector(AFDConnectorBase):
                 "WindowAFDConnector requires compute_gate_on_attention=true "
                 "for the ref-style Attention-to-FFN route",
             )
-        if self.extra_info.micro_batch_num != 1:
+        if self.extra_info.micro_batch_num not in (1, 2):
             raise ValueError(
-                "WindowAFDConnector stage one supports only micro_batch_num=1, "
+                "WindowAFDConnector supports only micro_batch_num=1 or 2, "
                 f"got {self.extra_info.micro_batch_num}",
+            )
+        if self.extra_info.micro_batch_num == 2 and self.async_mode:
+            raise ValueError(
+                "WindowAFDConnector U2 currently requires async_dp=false; "
+                "use vLLM request-boundary ubatching for the two stages",
             )
         if self.micro_batch_size > 512:
             raise ValueError(
@@ -482,6 +488,7 @@ class WindowAFDConnector(AFDConnectorBase):
 
     def _operator_shapes(self) -> tuple[list[int], list[int], list[int], list[int]]:
         batch_size = self.micro_batch_size
+        micro_batch_num = int(self.extra_info.micro_batch_num)
         quant_mode = self.extra_info.quant_mode
         # This is the last dimension of one A2F token record in the FFN
         # Window, not its byte size in every mode.  For H=7168 it is 7168
@@ -492,16 +499,25 @@ class WindowAFDConnector(AFDConnectorBase):
             if quant_mode == 2
             else self.hidden_size
         )
-        ffn_info = [self.attn_size, 1, 2 + batch_size * self.selected_expert_num]
+        ffn_info = [
+            self.attn_size,
+            micro_batch_num,
+            2 + batch_size * self.selected_expert_num,
+        ]
         ffn_data = [
             self.attn_size,
-            1,
+            micro_batch_num,
             batch_size,
             self.selected_expert_num,
             a2f_token_data_dim,
         ]
-        attn_info = [1, batch_size, self.selected_expert_num]
-        attn_data = [1, batch_size, self.selected_expert_num, self.hidden_size]
+        attn_info = [micro_batch_num, batch_size, self.selected_expert_num]
+        attn_data = [
+            micro_batch_num,
+            batch_size,
+            self.selected_expert_num,
+            self.hidden_size,
+        ]
         return ffn_info, ffn_data, attn_info, attn_data
 
     def _token_dtype(self) -> int:
@@ -586,8 +602,16 @@ class WindowAFDConnector(AFDConnectorBase):
         combine_scales[:batch_size].copy_(expert_scales)
         _, _, attn_info, _ = self._operator_shapes()
         session_id = torch.tensor([self.role_rank], dtype=torch.int32, device=x.device)
+        stage_idx = int(context.metadata.stage_idx)
+        self._validate_stage_idx(stage_idx)
+        requested_micro_batch_id = int(kwargs.get("micro_batch_id", stage_idx))
+        if requested_micro_batch_id != stage_idx:
+            raise RuntimeError(
+                "Window A2F micro_batch_id does not match transfer stage: "
+                f"micro_batch_id={requested_micro_batch_id} stage={stage_idx}",
+            )
         micro_batch_id = torch.tensor(
-            [int(kwargs.get("micro_batch_id", 0))],
+            [requested_micro_batch_id],
             dtype=torch.int32,
             device=x.device,
         )
@@ -626,10 +650,7 @@ class WindowAFDConnector(AFDConnectorBase):
             batch_size,
             expert_ids.shape[-1],
         )
-        transfer_key = (
-            int(context.metadata.stage_idx),
-            int(context.metadata.layer_idx),
-        )
+        transfer_key = (stage_idx, int(context.metadata.layer_idx))
         self._pending_transfers[transfer_key] = context
         state = WindowAFDTransferState(expert_scales=combine_scales)
         context.states = state
@@ -641,7 +662,9 @@ class WindowAFDConnector(AFDConnectorBase):
         **kwargs: Any,
     ) -> torch.Tensor:
         self._require_data_path()
-        key = (int(ubatch_idx), int(kwargs.get("layer_idx", 0)))
+        stage_idx = int(ubatch_idx)
+        self._validate_stage_idx(stage_idx)
+        key = (stage_idx, int(kwargs.get("layer_idx", 0)))
         context = self._pending_transfers.pop(key, None)
         if context is None or not isinstance(context.states, WindowAFDTransferState):
             raise RuntimeError(f"Window F2A has no pending transfer for {key}")
@@ -665,6 +688,7 @@ class WindowAFDConnector(AFDConnectorBase):
         **kwargs: Any,
     ) -> AFDA2FTransferPayload:
         self._require_data_path()
+        self._validate_stage_idx(int(ubatch_idx))
         batch_size = self.micro_batch_size
         # The operator expects the logical dimensions [A, BS, K+1, H].
         # Its tiling validates K+1 independently (currently <= 64); the
@@ -861,6 +885,34 @@ class WindowAFDConnector(AFDConnectorBase):
             context=context,
         )
 
+    def require_attention_pipeline_idle(self) -> None:
+        """Ensure no Window transfer from a prior U2 step was left pending."""
+        if self._pending_transfers:
+            raise RuntimeError(
+                "Window Attention pipeline is not idle: "
+                f"pending={tuple(sorted(self._pending_transfers))}"
+            )
+
+    def wait_for_attention_stage_receive(
+        self,
+        *,
+        stage_idx: int,
+        tensor: torch.Tensor,
+    ) -> None:
+        """Validate the stage before the synchronous F2A receive is consumed.
+
+        Window operators are blocking on the current stream.  The actual F2A
+        receive is therefore performed by ``recv_ffn_output`` when the
+        layer-major model completes the pending stage; no event wait is needed.
+        """
+        self._validate_stage_idx(int(stage_idx))
+        if tensor.dim() == 0:
+            raise RuntimeError("Window Attention stage tensor must be non-scalar")
+
+    def reset_attention_pipeline_state(self) -> None:
+        """Clear per-step pending state after a failed model forward."""
+        self._pending_transfers.clear()
+
     def send_ffn_output(
         self,
         ffn_output: torch.Tensor,
@@ -870,6 +922,13 @@ class WindowAFDConnector(AFDConnectorBase):
         self._require_data_path()
         if not isinstance(context.states, WindowAFDTransferState):
             raise RuntimeError("Window F2A requires batching state")
+        stage_idx = int(kwargs.get("ubatch_idx", context.metadata.stage_idx))
+        self._validate_stage_idx(stage_idx)
+        if stage_idx != int(context.metadata.stage_idx):
+            raise RuntimeError(
+                "Window F2A stage does not match transfer metadata: "
+                f"stage={stage_idx} metadata_stage={context.metadata.stage_idx}"
+            )
         state = context.states
         if any(
             value is None
@@ -942,6 +1001,14 @@ class WindowAFDConnector(AFDConnectorBase):
     def _require_data_path(self) -> None:
         if not self._initialized:
             raise RuntimeError("WindowAFDConnector data path is not initialized")
+
+    def _validate_stage_idx(self, stage_idx: int) -> None:
+        stage_count = int(self.extra_info.micro_batch_num)
+        if stage_idx < 0 or stage_idx >= stage_count:
+            raise RuntimeError(
+                "Window transfer stage is outside configured micro-batch range: "
+                f"stage={stage_idx} micro_batch_num={stage_count}"
+            )
 
     def select_experts(self, **kwargs: Any) -> tuple[torch.Tensor, torch.Tensor]:
         from vllm_ascend.ops.fused_moe.experts_selector import select_experts
