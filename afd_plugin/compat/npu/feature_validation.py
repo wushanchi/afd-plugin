@@ -67,6 +67,36 @@ def fail_if_unsupported_npu_afd_features(
         raise RuntimeError(
             "AFD NPU runtime supports exactly two ubatches when DBO is enabled",
         )
+    if afd_config.connector == "WindowAFDConnector":
+        window_micro_batch_num = int(getattr(extra_info, "micro_batch_num", 1))
+        if window_micro_batch_num not in (1, 2):
+            raise RuntimeError(
+                "WindowAFDConnector supports only micro_batch_num=1 or 2, "
+                f"got {window_micro_batch_num}",
+            )
+        if window_micro_batch_num == 2:
+            if not uses_ubatching or int(vllm_config.parallel_config.num_ubatches) != 2:
+                raise RuntimeError(
+                    "WindowAFDConnector micro_batch_num=2 requires "
+                    "use_ubatching=true and num_ubatches=2",
+                )
+            if not bool(vllm_config.parallel_config.enable_dbo):
+                raise RuntimeError(
+                    "WindowAFDConnector micro_batch_num=2 requires enable_dbo=true",
+                )
+            if not bool(vllm_config.model_config.enforce_eager):
+                raise RuntimeError(
+                    "WindowAFDConnector U2 currently supports enforce_eager=true only",
+                )
+            if bool(afd_config.async_dp):
+                raise RuntimeError(
+                    "WindowAFDConnector U2 currently requires async_dp=false",
+                )
+        elif uses_ubatching:
+            raise RuntimeError(
+                "WindowAFDConnector native ubatching requires "
+                "connector_extra_config.micro_batch_num=2",
+            )
     model_config = vllm_config.model_config
     # Match the pinned NPUModelRunner's sparse-attention backend selection.
     uses_sparse_mla = hasattr(

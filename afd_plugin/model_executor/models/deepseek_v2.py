@@ -159,7 +159,7 @@ class RemoteFFNProxy(nn.Module):
     def _send_and_receive(
         self,
         hidden_states: torch.Tensor,
-        **send_kwargs: torch.Tensor,
+        **send_kwargs: Any,
     ) -> torch.Tensor:
         transfer = self.dispatch_remote_ffn(hidden_states, **send_kwargs)
         return self.receive_remote_ffn(transfer)
@@ -167,7 +167,7 @@ class RemoteFFNProxy(nn.Module):
     def dispatch_remote_ffn(
         self,
         hidden_states: torch.Tensor,
-        **send_kwargs: torch.Tensor,
+        **send_kwargs: Any,
     ) -> AFDRemoteFFNTransfer:
         """Send one remote FFN input without immediately posting its receive."""
         afd_metadata = get_afd_metadata_from_forward_context()
@@ -193,6 +193,10 @@ class RemoteFFNProxy(nn.Module):
             speculative_step=self.speculative_step,
         )
         context = AFDTransferContext(metadata=metadata)
+        # Keep the logical ubatch identity explicit at the connector boundary.
+        # Window uses this value to select its ScheduleContext slot; other
+        # connectors ignore the optional keyword and retain their own routing.
+        send_kwargs["micro_batch_id"] = stage_idx
         if self.phase == "mtp":
             dp_metadata = getattr(forward_context, "dp_metadata", None)
             num_tokens_across_dp = getattr(

@@ -452,23 +452,22 @@ class AFDNPUAttentionModelRunner(NPUModelRunner):
         # changes the quantized/sparse-attention kernel shape and can change
         # exact token results.  Keep every request intact while retaining U2
         # across independent requests.
-        mtp_request_boundary_u2 = bool(
+        request_boundary_u2 = bool(
             self.speculative_config is not None
             and self.speculative_config.method == "mtp"
             and isinstance(self.connector, P2pHcclAFDConnector)
             and self.vllm_config.parallel_config.num_ubatches == 2
-        )
-        if mtp_request_boundary_u2 and ubatch_slices is not None:
+        ) or self._window_u2_enabled()
+        if request_boundary_u2 and ubatch_slices is not None:
             if num_scheduled_tokens_np is None:
-                raise RuntimeError(
-                    "DSV4 HCCL MTP U2 requires per-request scheduled token counts"
-                )
+                raise RuntimeError("AFD U2 requires per-request scheduled token counts")
             request_boundary_slices = create_request_boundary_ubatch_slices(
                 num_scheduled_tokens_np,
             )
             if request_boundary_slices is None:
                 raise RuntimeError(
-                    "DSV4 HCCL MTP U2 requires at least two non-empty requests"
+                    "AFD U2 requires at least two non-empty requests at "
+                    "request boundaries"
                 )
             ubatch_slices = request_boundary_slices
         if self.afd_async_extra_info.async_moe_ubatching:
@@ -1889,12 +1888,26 @@ class AFDNPUAttentionModelRunner(NPUModelRunner):
         elif self.compilation_config.cudagraph_mode.has_full_cudagraphs():
             runtime_mode = CUDAGraphMode.FULL
         connector = getattr(self, "connector", None)
-        enable_layer_major_eager_u2 = bool(
-            isinstance(connector, P2pHcclAFDConnector)
-            and connector.stream_overlap_enabled
-            and callable(
-                getattr(model, "forward_ubatches_layer_major", None),
+        window_u2 = bool(
+            getattr(connector, "is_window_connector", False)
+            and int(
+                getattr(
+                    getattr(connector, "extra_info", None),
+                    "micro_batch_num",
+                    1,
+                )
             )
+            == 2
+            and self.vllm_config.parallel_config.use_ubatching
+        )
+        enable_layer_major_eager_u2 = bool(
+            (
+                isinstance(connector, P2pHcclAFDConnector)
+                and connector.stream_overlap_enabled
+            )
+            or window_u2
+        ) and callable(
+            getattr(model, "forward_ubatches_layer_major", None),
         )
         model_config = self.vllm_config.model_config
         uses_sparse_attention = bool(
@@ -1967,6 +1980,22 @@ class AFDNPUAttentionModelRunner(NPUModelRunner):
                 torch.full((self.dp_size,), stage1_tokens, dtype=torch.int32),
             )
         return should_ubatch
+
+    def _window_u2_enabled(self) -> bool:
+        """Return whether this runner must execute the Window two-stage contract."""
+        connector = getattr(self, "connector", None)
+        return bool(
+            getattr(connector, "is_window_connector", False)
+            and int(
+                getattr(
+                    getattr(connector, "extra_info", None),
+                    "micro_batch_num",
+                    1,
+                )
+            )
+            == 2
+            and self.vllm_config.parallel_config.use_ubatching
+        )
 
     def _sync_afd_metadata_across_dp(
         self,
@@ -2204,21 +2233,21 @@ class AFDNPUAttentionModelRunner(NPUModelRunner):
             )
 
         should_ubatch, num_tokens_across_dp = False, None
-        mtp_request_boundary_u2 = bool(
+        request_boundary_u2 = bool(
             self.speculative_config is not None
             and self.speculative_config.method == "mtp"
             and isinstance(self.connector, P2pHcclAFDConnector)
             and self.vllm_config.parallel_config.num_ubatches == 2
-        )
+        ) or self._window_u2_enabled()
         request_boundary_slices = (
             create_request_boundary_ubatch_slices(num_scheduled_tokens_np)
-            if mtp_request_boundary_u2
+            if request_boundary_u2
             else None
         )
         request_boundary_stage0_tokens = (
             int(request_boundary_slices[0].num_tokens)
             if request_boundary_slices is not None
-            else (0 if mtp_request_boundary_u2 else None)
+            else (0 if request_boundary_u2 else None)
         )
         # ### PATCH START: AFD DP metadata synchronization
         if self.vllm_config.parallel_config.data_parallel_size > 1:
@@ -2250,7 +2279,7 @@ class AFDNPUAttentionModelRunner(NPUModelRunner):
                 uniform_decode=uniform_decode,
                 vllm_config=self.vllm_config,
             )
-            if mtp_request_boundary_u2:
+            if request_boundary_u2:
                 stage0_tokens = int(request_boundary_stage0_tokens or 0)
                 should_ubatch = self._apply_local_request_boundary_gate(
                     should_ubatch,
@@ -2258,6 +2287,17 @@ class AFDNPUAttentionModelRunner(NPUModelRunner):
                     stage0_tokens=stage0_tokens,
                 )
         # ### PATCH END: AFD DP metadata synchronization
+        if request_boundary_u2 and self._afd_live_execution:
+            if request_boundary_slices is None:
+                raise RuntimeError(
+                    "WindowAFDConnector U2 requires at least two non-empty "
+                    "requests at request boundaries"
+                )
+            if not should_ubatch:
+                raise RuntimeError(
+                    "WindowAFDConnector U2 batch does not satisfy DBO/ubatch "
+                    "thresholds"
+                )
         # ### PATCH START: AFD live NPU microbatching
         if not (allow_microbatching or self._afd_live_execution):
             should_ubatch = False
