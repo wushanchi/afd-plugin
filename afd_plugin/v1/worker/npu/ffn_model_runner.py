@@ -42,6 +42,7 @@ from afd_plugin.connectors.npu.async_cam import (
     CAMAsyncAFDConnector,
 )
 from afd_plugin.connectors.npu.p2p_hccl import P2pHcclAFDConnector
+from afd_plugin.connectors.npu.window import WindowAFDTransferState
 from afd_plugin.v1.worker.attention_model_runner import (
     _resolve_world_ranks,
 )
@@ -224,6 +225,12 @@ class AFDNPUFFNModelRunner(NPUModelRunner):
         return None
 
     def _window_ffn_forward(self) -> None:
+        if self.afd_config.async_dp:
+            self._window_ffn_forward_async()
+        else:
+            self._window_ffn_forward_sync()
+
+    def _window_ffn_forward_sync(self) -> None:
         """Run one synchronous Window exchange across all routed layers."""
         for layer_idx in _ffn_layer_indices(self):
             payload = self.connector.recv_attn_output(
@@ -235,42 +242,117 @@ class AFDNPUFFNModelRunner(NPUModelRunner):
             if states is None:
                 raise RuntimeError("Window batching returned no transfer state")
             hidden_states = payload.hidden_states
-            num_tokens = int(hidden_states.shape[0])
-            afd_metadata = AFDForwardContextMetadata(
-                tokens_start_loc=[0],
-                requests_start_loc=[0],
-                stage_idx=0,
-                connector=self.connector,
-                tokens_lens=[num_tokens],
-                num_stages=1,
-                tokens_unpadded_lens=[num_tokens],
+            rank_output = self._compute_window_ffn_layer(
+                payload=payload,
+                hidden_states=hidden_states,
+                layer_idx=int(layer_idx),
+                group_list=states.group_list,
+                dynamic_scale=states.dynamic_scale,
             )
-            with ascend_forward_context(
-                vllm_config=self.vllm_config,
-                afd_metadata=afd_metadata,
-                model_instance=self.model,
-                input_ids=payload.input_ids,
-                num_tokens=num_tokens,
-            ) as forward_context:
-                # ``afd_metadata`` must remain the plugin forward metadata
-                # object; the transfer metadata has no connector reference.
-                forward_context.additional_kwargs["afd_metadata"] = afd_metadata
-                _set_moe_layer_index(forward_context, int(layer_idx))
-                rank_output = self.model.compute_ffn_output(
-                    hidden_states=hidden_states,
-                    layer_idx=int(layer_idx),
-                    group_list=states.group_list,
-                    dynamic_scales=states.dynamic_scale,
-                    # Window normalizes batching's compact type-2 output to
-                    # the cumulative type-0 form used by the native P2P/MC2
-                    # W8A8 MLP path.
-                    group_list_type=0,
-                    input_ids=payload.input_ids,
-                )
             self.connector.send_ffn_output(
                 rank_output,
                 payload.context,
                 ubatch_idx=0,
+            )
+
+    def _window_ffn_forward_async(self) -> None:
+        """Batch ready Attention sessions and compute their active layers."""
+        payload = self.connector.recv_attn_output(
+            ubatch_idx=0,
+            max_num_tokens=self.max_num_tokens,
+        )
+        states = payload.context.states
+        if not isinstance(states, WindowAFDTransferState):
+            raise RuntimeError("Window batching returned invalid transfer state")
+        if not states.layer_batches:
+            # A ready Attention snapshot may contain no token routed to this
+            # FFN rank. It must still enter F2A with actual_token_num=0 so
+            # the other FFN ranks and Attention combine can make progress.
+            empty_output = payload.hidden_states.new_zeros(
+                payload.hidden_states.shape,
+                dtype=self.model_config.dtype,
+            )
+            self.connector.send_ffn_output(
+                empty_output,
+                payload.context,
+                ubatch_idx=0,
+            )
+            return
+
+        hidden_states = payload.hidden_states
+        routed_outputs = []
+        for layer_batch in states.layer_batches:
+            dynamic_scale = (
+                states.dynamic_scale[layer_batch.token_start : layer_batch.token_end]
+                if states.dynamic_scale is not None
+                else None
+            )
+            layer_output = self._compute_window_ffn_layer(
+                payload=payload,
+                hidden_states=hidden_states[
+                    layer_batch.token_start : layer_batch.token_end
+                ],
+                layer_idx=layer_batch.layer_idx,
+                group_list=layer_batch.group_list,
+                dynamic_scale=dynamic_scale,
+            )
+            routed_output = getattr(layer_output, "routed_output", layer_output)
+            if not isinstance(routed_output, torch.Tensor):
+                raise RuntimeError("Window FFN layer returned no routed output tensor")
+            routed_outputs.append(routed_output)
+
+        valid_output = torch.cat(routed_outputs, dim=0)
+        actual_num = sum(
+            batch.token_end - batch.token_start for batch in states.layer_batches
+        )
+        if valid_output.shape[0] != actual_num:
+            raise RuntimeError(
+                "Window FFN layer outputs do not match the batching token count: "
+                f"output={valid_output.shape[0]} actual={actual_num}"
+            )
+        full_output = valid_output.new_zeros(
+            (hidden_states.shape[0], *valid_output.shape[1:])
+        )
+        full_output[:actual_num].copy_(valid_output)
+        self.connector.send_ffn_output(full_output, payload.context, ubatch_idx=0)
+
+    def _compute_window_ffn_layer(
+        self,
+        *,
+        payload: Any,
+        hidden_states: torch.Tensor,
+        layer_idx: int,
+        group_list: torch.Tensor | None,
+        dynamic_scale: torch.Tensor | None,
+    ) -> torch.Tensor | AFDF2ATransferPayload:
+        if group_list is None:
+            raise RuntimeError("Window batching returned no group list")
+        num_tokens = int(hidden_states.shape[0])
+        afd_metadata = AFDForwardContextMetadata(
+            tokens_start_loc=[0],
+            requests_start_loc=[0],
+            stage_idx=0,
+            connector=self.connector,
+            tokens_lens=[num_tokens],
+            num_stages=1,
+            tokens_unpadded_lens=[num_tokens],
+        )
+        with ascend_forward_context(
+            vllm_config=self.vllm_config,
+            afd_metadata=afd_metadata,
+            model_instance=self.model,
+            input_ids=payload.input_ids,
+            num_tokens=num_tokens,
+        ) as forward_context:
+            forward_context.additional_kwargs["afd_metadata"] = afd_metadata
+            _set_moe_layer_index(forward_context, layer_idx)
+            return self.model.compute_ffn_output(
+                hidden_states=hidden_states,
+                layer_idx=layer_idx,
+                group_list=group_list,
+                dynamic_scales=dynamic_scale,
+                group_list_type=0,
+                input_ids=payload.input_ids,
             )
 
     def execute_model(

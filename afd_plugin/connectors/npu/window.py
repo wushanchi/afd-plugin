@@ -39,6 +39,16 @@ logger = init_logger(__name__)
 
 _COMM_CONTEXT_WINDOW_ALIGNMENT = 2 * 1024 * 1024
 
+@dataclass(frozen=True, slots=True)
+class WindowLayerBatch:
+    """One layer's contiguous token range in an asynchronous FFN batch."""
+
+    layer_idx: int
+    token_start: int
+    token_end: int
+    group_list: torch.Tensor
+
+
 @dataclass(slots=True)
 class WindowAFDTransferState(AFDTransferState):
     """Operator-produced routing metadata for one A2F exchange."""
@@ -51,14 +61,15 @@ class WindowAFDTransferState(AFDTransferState):
     token_ids: torch.Tensor | None = None
     expert_offsets: torch.Tensor | None = None
     actual_token_num: torch.Tensor | None = None
+    layer_batches: tuple[WindowLayerBatch, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
 class WindowAFDExtraInfo(ConnectorExtraInfo):
     """Window protocol options.
 
-    The initial implementation requires one micro-batch and executes all
-    Attention sessions in a layer-by-layer lock-step schedule.
+    The current implementation requires one micro-batch. Scheduling is
+    lock-step or independent per Attention session according to ``async_dp``.
     """
 
     micro_batch_num: int = 1
@@ -207,6 +218,8 @@ class WindowAFDConnector(AFDConnectorBase):
         self.world_size = self.mapping.world_size
         self.attn_size = self.mapping.attention_size
         self.ffn_size = self.mapping.ffn_size
+        self.async_mode = bool(afd_config.async_dp)
+        self.requires_lockstep_dp_sync = not self.async_mode
         self.process_group: ProcessGroup | None = None
         self.hccl_comm_name: str | None = None
         self.window_tensor: torch.Tensor | None = None
@@ -224,6 +237,7 @@ class WindowAFDConnector(AFDConnectorBase):
         self._initialized = False
 
         hf_config = vllm_config.model_config.hf_config
+        self.num_layers = int(hf_config.num_hidden_layers)
         self.hidden_size = int(hf_config.hidden_size)
         routed_topk = int(hf_config.num_experts_per_tok)
         shared_expert_num = int(hf_config.n_shared_experts)
@@ -577,9 +591,17 @@ class WindowAFDConnector(AFDConnectorBase):
             dtype=torch.int32,
             device=x.device,
         )
-        # The Window A2F operator models one active MoE layer per invocation;
-        # the model layer index is carried by the surrounding execution order.
-        layer_id = torch.zeros((1,), dtype=torch.int32, device=x.device)
+        model_layer_idx = int(context.metadata.layer_idx)
+        if model_layer_idx < 0 or model_layer_idx >= self.num_layers:
+            raise RuntimeError(
+                "Window A2F received an out-of-range model layer: "
+                f"layer={model_layer_idx} num_layers={self.num_layers}"
+            )
+        layer_id = torch.tensor(
+            [model_layer_idx if self.async_mode else 0],
+            dtype=torch.int32,
+            device=x.device,
+        )
         cot.attention_to_ffn(
             self.comm_buffer,
             x,
@@ -590,7 +612,10 @@ class WindowAFDConnector(AFDConnectorBase):
             self.expert_rank_table,
             attn_info,
             self.routed_expert_num,
-            sync_flag=0,
+            # The Ascend 950 AttentionToFfn V2 contract uses 0 for async and
+            # 1 for wait-all sync.  FfnWorkerBatching V2 uses the opposite
+            # value convention for its own sync_flag attribute.
+            sync_flag=0 if self.async_mode else 1,
             ffn_start_rank_id=0,
             active_mask=active_mask,
         )
@@ -650,14 +675,33 @@ class WindowAFDConnector(AFDConnectorBase):
             self.selected_expert_num,
             self.hidden_size,
         ]
-        outputs = torch_npu.npu_ffn_worker_batching(
-            self.schedule_context,
-            self.local_expert_num,
-            max_out_shape,
-            token_dtype=self._token_dtype(),
-            need_schedule=1,
-            layer_num=0,
+        batching_expert_num = self.local_expert_num * (
+            self.num_layers if self.async_mode else 1
         )
+        if batching_expert_num > 8192:
+            raise RuntimeError(
+                "Window batching expert count exceeds the operator limit: "
+                f"expert_num={batching_expert_num}"
+            )
+        if self.async_mode:
+            outputs = cot.ffn_worker_batching(
+                self.schedule_context,
+                batching_expert_num,
+                max_out_shape,
+                token_dtype=self._token_dtype(),
+                need_schedule=1,
+                layer_num=self.num_layers,
+                sync_flag=1,
+            )
+        else:
+            outputs = torch_npu.npu_ffn_worker_batching(
+                self.schedule_context,
+                batching_expert_num,
+                max_out_shape,
+                token_dtype=self._token_dtype(),
+                need_schedule=1,
+                layer_num=0,
+            )
         (
             hidden_states,
             group_list,
@@ -679,11 +723,11 @@ class WindowAFDConnector(AFDConnectorBase):
                 "Window batching returned invalid actual_token_num: "
                 f"actual={actual_num} capacity={hidden_states.shape[0]}",
             )
-        if group_list.shape != (self.local_expert_num, 2):
+        if group_list.shape != (batching_expert_num, 2):
             raise RuntimeError(
                 "Window batching returned group_list with unexpected shape: "
                 f"got={tuple(group_list.shape)} "
-                f"expected={(self.local_expert_num, 2)}",
+                f"expected={(batching_expert_num, 2)}",
             )
         # On A3 the batching kernel writes a compact type-2 group list followed
         # by one [0, 0] sentinel, but does not clear the rest of the fixed-size
@@ -692,7 +736,7 @@ class WindowAFDConnector(AFDConnectorBase):
         # W8A8 MoE MLP path.  This also discards the stale fixed-buffer suffix.
         if actual_num == 0:
             group_list = torch.zeros(
-                (self.local_expert_num,),
+                (batching_expert_num,),
                 dtype=group_list.dtype,
                 device=group_list.device,
             )
@@ -718,7 +762,7 @@ class WindowAFDConnector(AFDConnectorBase):
             if bool(
                 torch.any(
                     (valid_expert_ids < 0)
-                    | (valid_expert_ids >= self.local_expert_num)
+                    | (valid_expert_ids >= batching_expert_num)
                 ).item()
             ):
                 raise RuntimeError(
@@ -733,7 +777,7 @@ class WindowAFDConnector(AFDConnectorBase):
                     "strictly increasing",
                 )
             expert_counts = torch.zeros(
-                (self.local_expert_num,),
+                (batching_expert_num,),
                 dtype=group_list.dtype,
                 device=group_list.device,
             )
@@ -750,6 +794,37 @@ class WindowAFDConnector(AFDConnectorBase):
                 "Window batching cumulative group_list does not match "
                 f"actual_token_num: group_sum={group_sum} actual={actual_num}",
             )
+        layer_batches: tuple[WindowLayerBatch, ...] = ()
+        if self.async_mode and actual_num > 0:
+            experts_per_layer = self.local_expert_num
+            layer_ends = group_list[experts_per_layer - 1 :: experts_per_layer]
+            layer_starts = torch.cat((layer_ends.new_zeros(1), layer_ends[:-1]))
+            layer_bounds = (
+                torch.stack((layer_starts, layer_ends), dim=1).cpu().tolist()
+            )
+            batches = []
+            for layer_idx, (token_start, token_end) in enumerate(layer_bounds):
+                if token_start == token_end:
+                    continue
+                expert_start = layer_idx * experts_per_layer
+                expert_end = expert_start + experts_per_layer
+                batches.append(
+                    WindowLayerBatch(
+                        layer_idx=layer_idx,
+                        token_start=int(token_start),
+                        token_end=int(token_end),
+                        group_list=group_list[expert_start:expert_end] - token_start,
+                    )
+                )
+            layer_batches = tuple(batches)
+            covered_token_num = sum(
+                batch.token_end - batch.token_start for batch in layer_batches
+            )
+            if covered_token_num != actual_num:
+                raise RuntimeError(
+                    "Window batching layer slices do not cover actual_token_num: "
+                    f"layers={layer_batches} actual={actual_num}"
+                )
         logger.debug(
             "Window FFN batching completed layer=%d stage=%d",
             int(kwargs.get("layer_idx", 0)),
@@ -774,6 +849,7 @@ class WindowAFDConnector(AFDConnectorBase):
                 token_ids=token_ids,
                 expert_offsets=expert_offsets,
                 actual_token_num=actual_token_num,
+                layer_batches=layer_batches,
             ),
         )
         # Keep the static batching capacity Y.  The cumulative group_list and
