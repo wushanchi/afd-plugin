@@ -84,14 +84,6 @@ def fail_if_unsupported_npu_afd_features(
                 raise RuntimeError(
                     "WindowAFDConnector micro_batch_num=2 requires enable_dbo=true",
                 )
-            if not bool(vllm_config.model_config.enforce_eager):
-                raise RuntimeError(
-                    "WindowAFDConnector U2 currently supports enforce_eager=true only",
-                )
-            if bool(afd_config.async_dp):
-                raise RuntimeError(
-                    "WindowAFDConnector U2 currently requires async_dp=false",
-                )
         elif uses_ubatching:
             raise RuntimeError(
                 "WindowAFDConnector native ubatching requires "

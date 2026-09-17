@@ -68,9 +68,8 @@ class WindowAFDTransferState(AFDTransferState):
 class WindowAFDExtraInfo(ConnectorExtraInfo):
     """Window protocol options.
 
-    Window supports one stage (U1) or two request-boundary stages (U2).
-    Scheduling is lock-step or independent per Attention session according to
-    ``async_dp``; U2 currently uses the eager lock-step path.
+    One or two Window micro-batch slots are supported. Scheduling is lock-step
+    or independent per Attention session according to ``async_dp``.
     """
 
     micro_batch_num: int = 1
@@ -246,6 +245,7 @@ class WindowAFDConnector(AFDConnectorBase):
         self.routed_expert_num = int(hf_config.n_routed_experts)
         self.selected_expert_num = routed_topk + shared_expert_num
         self.expert_num = self.routed_expert_num + shared_expert_num
+        self.micro_batch_num = self.extra_info.micro_batch_num
         self.micro_batch_size = int(vllm_config.scheduler_config.max_num_batched_tokens)
 
     @property
@@ -260,15 +260,21 @@ class WindowAFDConnector(AFDConnectorBase):
                 "WindowAFDConnector requires compute_gate_on_attention=true "
                 "for the ref-style Attention-to-FFN route",
             )
-        if self.extra_info.micro_batch_num not in (1, 2):
+        if self.micro_batch_num not in (1, 2):
             raise ValueError(
                 "WindowAFDConnector supports only micro_batch_num=1 or 2, "
-                f"got {self.extra_info.micro_batch_num}",
+                f"got {self.micro_batch_num}",
             )
-        if self.extra_info.micro_batch_num == 2 and self.async_mode:
+        parallel_config = self.vllm_config.parallel_config
+        runtime_micro_batch_num = (
+            int(parallel_config.num_ubatches)
+            if parallel_config.enable_dbo and parallel_config.use_ubatching
+            else 1
+        )
+        if self.micro_batch_num != runtime_micro_batch_num:
             raise ValueError(
-                "WindowAFDConnector U2 currently requires async_dp=false; "
-                "use vLLM request-boundary ubatching for the two stages",
+                "Window micro_batch_num must match the vLLM DBO mode: "
+                f"window={self.micro_batch_num} runtime={runtime_micro_batch_num}",
             )
         if self.micro_batch_size > 512:
             raise ValueError(
