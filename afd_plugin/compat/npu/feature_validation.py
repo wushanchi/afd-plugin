@@ -74,7 +74,7 @@ def fail_if_unsupported_npu_afd_features(
                 "WindowAFDConnector supports only micro_batch_num=1 or 2, "
                 f"got {window_micro_batch_num}",
             )
-        if window_micro_batch_num == 2:
+        if window_micro_batch_num == 2 and afd_config.role == "attention":
             if not uses_ubatching or int(vllm_config.parallel_config.num_ubatches) != 2:
                 raise RuntimeError(
                     "WindowAFDConnector micro_batch_num=2 requires "

@@ -265,17 +265,19 @@ class WindowAFDConnector(AFDConnectorBase):
                 "WindowAFDConnector supports only micro_batch_num=1 or 2, "
                 f"got {self.micro_batch_num}",
             )
-        parallel_config = self.vllm_config.parallel_config
-        runtime_micro_batch_num = (
-            int(parallel_config.num_ubatches)
-            if parallel_config.enable_dbo and parallel_config.use_ubatching
-            else 1
-        )
-        if self.micro_batch_num != runtime_micro_batch_num:
-            raise ValueError(
-                "Window micro_batch_num must match the vLLM DBO mode: "
-                f"window={self.micro_batch_num} runtime={runtime_micro_batch_num}",
+        if self.afd_config.role == "attention":
+            parallel_config = self.vllm_config.parallel_config
+            runtime_micro_batch_num = (
+                int(parallel_config.num_ubatches)
+                if parallel_config.enable_dbo and parallel_config.use_ubatching
+                else 1
             )
+            if self.micro_batch_num != runtime_micro_batch_num:
+                raise ValueError(
+                    "Window micro_batch_num must match the vLLM DBO mode: "
+                    f"window={self.micro_batch_num} "
+                    f"runtime={runtime_micro_batch_num}",
+                )
         if self.micro_batch_size > 512:
             raise ValueError(
                 "WindowAFDConnector requires max_num_batched_tokens <= 512 "
