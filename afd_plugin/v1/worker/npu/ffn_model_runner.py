@@ -231,38 +231,29 @@ class AFDNPUFFNModelRunner(NPUModelRunner):
             self._window_ffn_forward_sync()
 
     def _window_ffn_forward_sync(self) -> None:
-        """Run the synchronous Window exchange for every U1/U2 stage."""
-        stage_count = int(
-            getattr(getattr(self.connector, "extra_info", None), "micro_batch_num", 1)
-        )
-        if stage_count not in (1, 2):
-            raise RuntimeError(
-                "Window FFN supports only one or two stages, "
-                f"got micro_batch_num={stage_count}"
-            )
+        """Run one operator-managed Window batch for every routed layer."""
         for layer_idx in _ffn_layer_indices(self):
-            for stage_idx in range(stage_count):
-                payload = self.connector.recv_attn_output(
-                    ubatch_idx=stage_idx,
-                    layer_idx=int(layer_idx),
-                    max_num_tokens=self.max_num_tokens,
-                )
-                states = payload.context.states
-                if states is None:
-                    raise RuntimeError("Window batching returned no transfer state")
-                hidden_states = payload.hidden_states
-                rank_output = self._compute_window_ffn_layer(
-                    payload=payload,
-                    hidden_states=hidden_states,
-                    layer_idx=int(layer_idx),
-                    group_list=states.group_list,
-                    dynamic_scale=states.dynamic_scale,
-                )
-                self.connector.send_ffn_output(
-                    rank_output,
-                    payload.context,
-                    ubatch_idx=stage_idx,
-                )
+            payload = self.connector.recv_attn_output(
+                ubatch_idx=0,
+                layer_idx=int(layer_idx),
+                max_num_tokens=self.max_num_tokens,
+            )
+            states = payload.context.states
+            if states is None:
+                raise RuntimeError("Window batching returned no transfer state")
+            hidden_states = payload.hidden_states
+            rank_output = self._compute_window_ffn_layer(
+                payload=payload,
+                hidden_states=hidden_states,
+                layer_idx=int(layer_idx),
+                group_list=states.group_list,
+                dynamic_scale=states.dynamic_scale,
+            )
+            self.connector.send_ffn_output(
+                rank_output,
+                payload.context,
+                ubatch_idx=0,
+            )
 
     def _window_ffn_forward_async(self) -> None:
         """Batch ready Attention sessions and compute their active layers."""
@@ -337,17 +328,13 @@ class AFDNPUFFNModelRunner(NPUModelRunner):
         if group_list is None:
             raise RuntimeError("Window batching returned no group list")
         num_tokens = int(hidden_states.shape[0])
-        stage_idx = int(payload.context.metadata.stage_idx)
-        stage_count = int(
-            getattr(getattr(self.connector, "extra_info", None), "micro_batch_num", 1)
-        )
         afd_metadata = AFDForwardContextMetadata(
             tokens_start_loc=[0],
             requests_start_loc=[0],
-            stage_idx=stage_idx,
+            stage_idx=0,
             connector=self.connector,
             tokens_lens=[num_tokens],
-            num_stages=stage_count,
+            num_stages=1,
             tokens_unpadded_lens=[num_tokens],
         )
         num_tokens_across_dp = None

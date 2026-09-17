@@ -701,7 +701,8 @@ class WindowAFDConnector(AFDConnectorBase):
         **kwargs: Any,
     ) -> AFDA2FTransferPayload:
         self._require_data_path()
-        self._validate_stage_idx(int(ubatch_idx))
+        # The batching operator selects ready Window slots. ``ubatch_idx`` is
+        # orchestration metadata only; returned micro_batch_ids are authoritative.
         batch_size = self.micro_batch_size
         # The operator expects the logical dimensions [A, BS, K+1, H].
         # Its tiling validates K+1 independently (currently <= 64); the
@@ -912,12 +913,7 @@ class WindowAFDConnector(AFDConnectorBase):
         stage_idx: int,
         tensor: torch.Tensor,
     ) -> None:
-        """Validate the stage before the synchronous F2A receive is consumed.
-
-        Window operators are blocking on the current stream.  The actual F2A
-        receive is therefore performed by ``recv_ffn_output`` when the
-        layer-major model completes the pending stage; no event wait is needed.
-        """
+        """Window F2A has already completed when recv_ffn_output returns."""
         self._validate_stage_idx(int(stage_idx))
         if tensor.dim() == 0:
             raise RuntimeError("Window Attention stage tensor must be non-scalar")
@@ -935,13 +931,6 @@ class WindowAFDConnector(AFDConnectorBase):
         self._require_data_path()
         if not isinstance(context.states, WindowAFDTransferState):
             raise RuntimeError("Window F2A requires batching state")
-        stage_idx = int(kwargs.get("ubatch_idx", context.metadata.stage_idx))
-        self._validate_stage_idx(stage_idx)
-        if stage_idx != int(context.metadata.stage_idx):
-            raise RuntimeError(
-                "Window F2A stage does not match transfer metadata: "
-                f"stage={stage_idx} metadata_stage={context.metadata.stage_idx}"
-            )
         state = context.states
         if any(
             value is None
@@ -1006,8 +995,8 @@ class WindowAFDConnector(AFDConnectorBase):
             attn_rank_table=self.attn_rank_table,
         )
         logger.debug(
-            "Window F2A sent stage=%d actual_tokens=%s",
-            context.metadata.stage_idx,
+            "Window F2A sent micro_batch_ids=%s actual_tokens=%s",
+            state.micro_batch_ids[:actual_num],
             state.actual_token_num,
         )
 

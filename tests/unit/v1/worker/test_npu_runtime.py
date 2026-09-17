@@ -696,6 +696,52 @@ def _new_ffn_runner():
     return runner
 
 
+def test_window_sync_ffn_batches_once_per_layer():
+    _require_npu_runtime()
+    calls = []
+
+    class OperatorManagedWindowConnector:
+        extra_info = SimpleNamespace(micro_batch_num=2)
+
+        def recv_attn_output(self, *, ubatch_idx, layer_idx, **_kwargs):
+            calls.append(("recv", layer_idx, ubatch_idx))
+            return _ffn_payload(
+                f"hidden-{layer_idx}",
+                AFDTransferMetadata.create_ffn_metadata(
+                    layer_idx=layer_idx,
+                    stage_idx=0,
+                    seq_lens=[1],
+                ),
+                states=SimpleNamespace(group_list="groups", dynamic_scale=None),
+            )
+
+        def send_ffn_output(self, output, context, *, ubatch_idx):
+            calls.append(
+                ("send", context.metadata.layer_idx, ubatch_idx, output),
+            )
+
+    runner = _new_ffn_runner()
+    runner.afd_config = SimpleNamespace(
+        async_dp=False,
+        compute_gate_on_attention=False,
+    )
+    runner.connector = OperatorManagedWindowConnector()
+    runner.num_layers = 2
+    runner.max_num_tokens = 8
+    runner._compute_window_ffn_layer = lambda **kwargs: (
+        f"output-{kwargs['layer_idx']}"
+    )
+
+    runner._window_ffn_forward_sync()
+
+    assert calls == [
+        ("recv", 0, 0),
+        ("send", 0, 0, "output-0"),
+        ("recv", 1, 0),
+        ("send", 1, 0, "output-1"),
+    ]
+
+
 def _new_ffn_worker():
     _require_npu_runtime()
     from afd_plugin.v1.worker.npu.ffn_worker import AFDNPUFFNWorker

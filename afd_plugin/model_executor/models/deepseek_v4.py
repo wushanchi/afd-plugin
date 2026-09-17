@@ -833,61 +833,6 @@ class AFDDeepseekV4Model(native.DeepseekV4Model):
         connector = connectors[0]
         if any(stage_connector is not connector for stage_connector in connectors[1:]):
             raise RuntimeError("DSV4 layer-major U2 stages must share one connector")
-        hidden_ubatches: list[torch.Tensor] = []
-        pending_layers: list[AFDDeepseekV4DecoderLayer | None] = [None, None]
-        pending_continuations: list[
-            tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None
-        ] = [None, None]
-        aux_hidden_ubatches: list[list[torch.Tensor]] = [[], []]
-        for item, forward_context in zip(
-            ubatch_metadata,
-            stage_contexts,
-            strict=True,
-        ):
-            with override_forward_context(forward_context):
-                if native.get_pp_group().is_first_rank:
-                    hidden_states = (
-                        item.inputs_embeds
-                        if item.inputs_embeds is not None
-                        else self.embed_input_ids(item.input_ids)
-                    )
-                    hidden_states = hidden_states.unsqueeze(1).repeat(
-                        1,
-                        self.hc_mult,
-                        1,
-                    )
-                else:
-                    if item.intermediate_tensors is None:
-                        raise RuntimeError(
-                            "pipeline stage requires intermediate tensors"
-                        )
-                    hidden_states = item.intermediate_tensors["hidden_states"]
-                hidden_ubatches.append(hidden_states)
-        if bool(getattr(connector, "is_window_connector", False)):
-            require_idle = getattr(connector, "require_attention_pipeline_idle", None)
-            if callable(require_idle):
-                require_idle()
-            try:
-                self._forward_ubatches_window_sync(
-                    ubatch_metadata=ubatch_metadata,
-                    stage_contexts=stage_contexts,
-                    hidden_ubatches=hidden_ubatches,
-                    aux_hidden_ubatches=aux_hidden_ubatches,
-                )
-            except BaseException:
-                reset_pipeline = getattr(
-                    connector,
-                    "reset_attention_pipeline_state",
-                    None,
-                )
-                if callable(reset_pipeline):
-                    reset_pipeline()
-                raise
-            return self._finish_ubatch_outputs(
-                stage_contexts=stage_contexts,
-                hidden_ubatches=hidden_ubatches,
-                aux_hidden_ubatches=aux_hidden_ubatches,
-            )
         require_idle = getattr(connector, "require_attention_pipeline_idle", None)
         wait_for_receive = getattr(
             connector,
@@ -898,8 +843,39 @@ class AFDDeepseekV4Model(native.DeepseekV4Model):
         if not all(callable(method) for method in (require_idle, wait_for_receive)):
             raise RuntimeError("DSV4 layer-major U2 requires the HCCL stream connector")
 
+        hidden_ubatches: list[torch.Tensor] = []
+        pending_layers: list[AFDDeepseekV4DecoderLayer | None] = [None, None]
+        pending_continuations: list[
+            tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None
+        ] = [None, None]
+        aux_hidden_ubatches: list[list[torch.Tensor]] = [[], []]
         require_idle()
         try:
+            for item, forward_context in zip(
+                ubatch_metadata,
+                stage_contexts,
+                strict=True,
+            ):
+                with override_forward_context(forward_context):
+                    if native.get_pp_group().is_first_rank:
+                        hidden_states = (
+                            item.inputs_embeds
+                            if item.inputs_embeds is not None
+                            else self.embed_input_ids(item.input_ids)
+                        )
+                        hidden_states = hidden_states.unsqueeze(1).repeat(
+                            1,
+                            self.hc_mult,
+                            1,
+                        )
+                    else:
+                        if item.intermediate_tensors is None:
+                            raise RuntimeError(
+                                "pipeline stage requires intermediate tensors"
+                            )
+                        hidden_states = item.intermediate_tensors["hidden_states"]
+                    hidden_ubatches.append(hidden_states)
+
             graph_pipeline_active = getattr(
                 connector,
                 "attention_graph_compute_pipeline_active",
@@ -950,79 +926,6 @@ class AFDDeepseekV4Model(native.DeepseekV4Model):
                 )
                 buffer_offset = next_offset
 
-        outputs: list[Any] = []
-        for stage_idx, forward_context in enumerate(stage_contexts):
-            with override_forward_context(forward_context):
-                hidden_states = self.hc_head(
-                    hidden_ubatches[stage_idx],
-                    self.hc_head_fn,
-                    self.hc_head_scale,
-                    self.hc_head_base,
-                )
-                hidden_states = self.norm(hidden_states)
-                aux_hidden_states = aux_hidden_ubatches[stage_idx]
-                outputs.append(
-                    (hidden_states, aux_hidden_states)
-                    if aux_hidden_states
-                    else hidden_states
-                )
-        return outputs
-
-    def _forward_ubatches_window_sync(
-        self,
-        *,
-        ubatch_metadata: list[Any],
-        stage_contexts: list[Any],
-        hidden_ubatches: list[torch.Tensor],
-        aux_hidden_ubatches: list[list[torch.Tensor]],
-    ) -> None:
-        """Run Window U2 with blocking A2F/F2A operators.
-
-        The generic layer-major helper defers F2A receives for P2P stream
-        events. Window operators complete the receive synchronously inside
-        ``receive_remote_ffn``; completing the mHC continuation immediately
-        avoids consuming the same transfer twice.
-        """
-        llama_4_scaling = None
-        layers = list(islice(self.layers, self.start_layer, self.end_layer))
-        for layer in layers:
-            for stage_idx, (item, forward_context) in enumerate(
-                zip(ubatch_metadata, stage_contexts, strict=True)
-            ):
-                with override_forward_context(forward_context):
-                    hidden_states, continuation = layer.forward_attention_to_remote_ffn(
-                        item.positions,
-                        hidden_ubatches[stage_idx],
-                        None,
-                        llama_4_scaling,
-                    )
-                    hidden_ubatches[stage_idx] = (
-                        layer.complete_remote_ffn(hidden_states, continuation)
-                    )
-                    if layer.layer_idx + 1 in self.aux_hidden_state_layers:
-                        aux_hidden_ubatches[stage_idx].append(
-                            hidden_ubatches[stage_idx].mean(dim=1)
-                        )
-
-    def _finish_ubatch_outputs(
-        self,
-        *,
-        stage_contexts: list[Any],
-        hidden_ubatches: list[torch.Tensor],
-        aux_hidden_ubatches: list[list[torch.Tensor]],
-    ) -> list[Any] | list[native.IntermediateTensors]:
-        if not native.get_pp_group().is_last_rank:
-            return [
-                native.IntermediateTensors({"hidden_states": hidden_states})
-                for hidden_states in hidden_ubatches
-            ]
-        if self.mtp_enabled:
-            buffer_offset = 0
-            for hidden_states in hidden_ubatches:
-                mtp_hidden = hidden_states.flatten(1)
-                next_offset = buffer_offset + mtp_hidden.shape[0]
-                self._mtp_hidden_buffer[buffer_offset:next_offset].copy_(mtp_hidden)
-                buffer_offset = next_offset
         outputs: list[Any] = []
         for stage_idx, forward_context in enumerate(stage_contexts):
             with override_forward_context(forward_context):

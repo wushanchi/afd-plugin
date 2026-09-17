@@ -2057,22 +2057,6 @@ class AFDNPUAttentionModelRunner(NPUModelRunner):
             )
         return should_ubatch
 
-    def _window_u2_enabled(self) -> bool:
-        """Return whether this runner must execute the Window two-stage contract."""
-        connector = getattr(self, "connector", None)
-        return bool(
-            getattr(connector, "is_window_connector", False)
-            and int(
-                getattr(
-                    getattr(connector, "extra_info", None),
-                    "micro_batch_num",
-                    1,
-                )
-            )
-            == 2
-            and self.vllm_config.parallel_config.use_ubatching
-        )
-
     def _sync_afd_metadata_across_dp(
         self,
         num_tokens_unpadded: int,

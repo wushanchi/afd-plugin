@@ -291,9 +291,11 @@ def test_attention_target_allocates_mtp_hidden_buffer_only_when_enabled(
 
 
 @pytest.mark.parametrize("mtp_enabled", [False, True])
+@pytest.mark.parametrize("is_window_connector", [False, True])
 def test_attention_layer_major_u2_runs_layer_then_stage(
     monkeypatch,
     mtp_enabled,
+    is_window_connector,
 ):
     events = []
     active_context = [None]
@@ -343,6 +345,7 @@ def test_attention_layer_major_u2_runs_layer_then_stage(
             return ffn_output
 
     connector = FakeConnector()
+    connector.is_window_connector = is_window_connector
     model = object.__new__(adapter.AFDDeepseekV4Model)
     nn.Module.__init__(model)
     model.afd_role = "attention"
