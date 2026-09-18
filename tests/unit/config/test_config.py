@@ -41,6 +41,56 @@ def test_parse_canonical_additional_config_namespace():
     assert config.is_ffn_server
 
 
+def test_hccl_p2p_config_accepts_integer_multiple_attention_ranks():
+    config = parse_afd_config(
+        {
+            "afd": {
+                "role": "attention",
+                "connector": "P2pHcclAFDConnector",
+                "num_attention_ranks": 4,
+                "num_ffn_ranks": 2,
+            },
+        },
+    )
+
+    assert config.num_attention_ranks == 4
+    assert config.num_ffn_ranks == 2
+
+
+def test_hccl_p2p_config_accepts_integer_multiple_ffn_ranks():
+    config = parse_afd_config(
+        {
+            "afd": {
+                "role": "attention",
+                "connector": "P2pHcclAFDConnector",
+                "num_attention_ranks": 1,
+                "num_ffn_ranks": 2,
+            },
+        },
+    )
+
+    assert config.num_attention_ranks == 1
+    assert config.num_ffn_ranks == 2
+
+
+@pytest.mark.parametrize(
+    ("attention", "ffn"),
+    [(3, 2), (2, 3), (0, 1), (1, 0), (-1, 1), (1, -1)],
+)
+def test_hccl_p2p_config_rejects_unsupported_topology(attention, ffn):
+    with pytest.raises(ValueError, match="require"):
+        parse_afd_config(
+            {
+                "afd": {
+                    "role": "attention",
+                    "connector": "P2pHcclAFDConnector",
+                    "num_attention_ranks": attention,
+                    "num_ffn_ranks": ffn,
+                },
+            },
+        )
+
+
 def test_parse_vllm_like_config_object():
     vllm_config = SimpleNamespace(
         additional_config={

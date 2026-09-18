@@ -234,10 +234,8 @@ def test_engine_core_patch_leaves_non_ffn_path_untouched(monkeypatch):
 
     engine = core_module.EngineCore(_config("attention"), Executor, log_stats=False)
 
-    assert not hasattr(engine, "original_init_called")
-    assert isinstance(engine.model_executor, Executor)
-    assert engine.scheduler is not None
-    assert engine.available_gpu_memory_for_kv_cache == -1
+    assert engine.original_init_called is True
+    assert not hasattr(engine, "model_executor")
 
 
 def test_engine_core_patch_runs_and_stops_ffn_loop(monkeypatch):
