@@ -22,6 +22,7 @@ AFDRole = Literal["attention", "ffn"]
 SUPPORTED_AFD_ROLES: Final[tuple[str, ...]] = ("attention", "ffn")
 SUPPORTED_AFD_CONNECTORS: Final[tuple[str, ...]] = (
     "P2pNcclAFDConnector",
+    "P2pHcclAFDConnector",
     "CAMP2pAFDConnector",
     AFD_ASYNC_CONNECTOR,
 )
@@ -311,7 +312,10 @@ def validate_afd_config(
         raise ValueError(
             "AFD async mode requires connector='CAMAsyncAFDConnector'",
         )
-    if config.connector == "P2pNcclAFDConnector":
+    if config.connector in {
+        "P2pNcclAFDConnector",
+        "P2pHcclAFDConnector",
+    }:
         from afd_plugin.distributed import validate_p2p_topology
 
         validate_p2p_topology(config)

@@ -15,7 +15,10 @@ from afd_plugin.compat.npu import (
     fix_all2all_backend_for_afd,
     npu_afd_num_ubatches,
 )
-from afd_plugin.model_executor.models.model_utils import get_afd_model_config
+from afd_plugin.model_executor.models.model_utils import (
+    get_afd_model_config,
+    install_afd_speculative_model_config,
+)
 from afd_plugin.v1.worker.npu.attention_model_runner import (
     AFDNPUAttentionModelRunner,
 )
@@ -56,10 +59,25 @@ class AFDNPUAttentionWorker(NPUWorker):
         self.vllm_config.model_config = get_afd_model_config(
             self.vllm_config.model_config,
         )
+        install_afd_speculative_model_config(self.vllm_config)
         self.model_runner = AFDNPUAttentionModelRunner(
             self.vllm_config,
             self.device,
         )
+
+    # Upstream source: vLLM-Ascend 3da28f94, NPUWorker.execute_dummy_batch.
+    # Patch reason: online idle DP ranks also need the MTP phase handshake;
+    # FFN must not post draft device receives before target sampling completes.
+    # Patch functionality: distinguish serving dummy work from startup capture.
+    # Signature: matches upstream; no added parameters.
+    def execute_dummy_batch(self) -> None:
+        # ### PATCH START: AFD online dummy scope
+        self.model_runner._afd_live_dummy_execution = True
+        try:
+            super().execute_dummy_batch()
+        finally:
+            self.model_runner._afd_live_dummy_execution = False
+        # ### PATCH END: AFD online dummy scope
 
 
 __all__ = ["AFDNPUAttentionWorker"]
