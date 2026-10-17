@@ -65,7 +65,7 @@ _DEEPSEEK_MODEL_REGISTRATIONS = {
     # Engram, mHC and the multimodal vision tower).  Keep it on a separate AFD
     # wrapper path instead of routing it through the V4 adapter.
     "DeepseekV41ForCausalLM": (
-        "afd_plugin.model_executor.models.deepseek_v41:AFDDeepseekV41ForCausalLM"
+        "afd_plugin.model_executor.models.deepseek_v41:AFDDeepseekV41VisionForCausalLM"
     ),
     "DeepseekV41VisionForCausalLM": (
         "afd_plugin.model_executor.models.deepseek_v41:AFDDeepseekV41VisionForCausalLM"

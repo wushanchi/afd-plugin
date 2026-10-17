@@ -36,7 +36,8 @@ def test_deepseek_afd_model_registration_paths_are_lazy_strings():
         "afd_plugin.model_executor.models.deepseek_v4:AFDDeepseekV4ForCausalLM"
     )
     assert registrations["DeepseekV41ForCausalLM"] == (
-        "afd_plugin.model_executor.models.deepseek_v41:AFDDeepseekV41ForCausalLM"
+        "afd_plugin.model_executor.models.deepseek_v41:"
+        "AFDDeepseekV41VisionForCausalLM"
     )
     assert registrations["DeepseekV41VisionForCausalLM"] == (
         "afd_plugin.model_executor.models.deepseek_v41:"
