@@ -155,6 +155,15 @@ For implementation details, see the
 
 ## Using the Plugin
 
+### DeepSeek-V4.1 Flash AFD status
+
+The `asyn-opt` branch contains the staged DeepSeek-V4.1 text P2P/U1 adapter.
+Its environment, source pins, unsupported paths, and NPU validation gates are
+listed in [the V4.1 AFD status note](docs/models/deepseek_v41/deepseek_v41_afd_status.md).
+The existing 910C custom AFD operator build is not an Ascend 950/A5 operator
+package; complete V4.1 Window, Graph/U2, DSpark, Engram, and multimodal support
+requires a matching vLLM-Ascend/CANN stack and further staged validation.
+
 Install or sync the distribution as `vllm-afd-plugin`. Python imports use the
 `afd_plugin` package name.
 
