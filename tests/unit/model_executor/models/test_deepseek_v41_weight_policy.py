@@ -21,6 +21,7 @@ from afd_plugin.model_executor.models.deepseek_v41 import (  # noqa: E402
         ("model.layers.0.input_layernorm.weight", {"attention"}),
         ("model.layers.0.hc_ffn_fn", {"attention"}),
         ("model.layers.0.mlp.gate.weight", {"ffn"}),
+        ("model.layers.0.ffn.gate.weight", {"ffn"}),
         ("model.layers.0.mlp.experts.7.w1.weight", {"ffn"}),
         ("model.layers.0.mlp.shared_experts.gate_proj.weight", {"ffn"}),
         ("mtp.0.layers.0.mlp.experts.0.w1.weight", set()),

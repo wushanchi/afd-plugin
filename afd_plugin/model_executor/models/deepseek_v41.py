@@ -40,7 +40,13 @@ def _checkpoint_weight_roles(name: str) -> frozenset[str]:
         return frozenset()
     parts = normalized.split(".")
     if len(parts) >= 3 and parts[0] == "layers" and parts[1].isdigit():
-        return frozenset({_FFN_ROLE}) if parts[2] == "mlp" else frozenset({_ATTENTION_ROLE})
+        # GitCode checkpoints use ``ffn`` while vLLM-Ascend's native module
+        # namespace uses ``mlp``; native load_weights remaps both spellings.
+        return (
+            frozenset({_FFN_ROLE})
+            if parts[2] in {"mlp", "ffn"}
+            else frozenset({_ATTENTION_ROLE})
+        )
     return frozenset({_ATTENTION_ROLE})
 
 
