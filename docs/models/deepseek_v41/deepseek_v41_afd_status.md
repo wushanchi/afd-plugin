@@ -30,6 +30,8 @@ GitCode 的 V4.1 代码提供原生 Vision、CSA/DSA、Engram、MoE、量化和 
 - Engram transfer；
 - 需要跨角色传递 `image_mask`、视觉路由状态或 Engram hash 的扩展协议。
 
+配置校验会在进入模型构造前拒绝 `use_ubatching/DBO`，因为 V4.1 的 `pre_mix` 和 shared-attention state 尚未接入现有 V4 layer-major U2 调度。
+
 Vision wrapper 目前只复用了原生图像编码和语言模型入口，跨 AFD 的图像元数据、视觉 bias 和图像请求精度仍为 `Pending-NPU`。
 
 ## 必须满足的运行条件

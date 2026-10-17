@@ -156,6 +156,7 @@ def _fail_if_unsupported_deepseek_v4_features(
 
     hf_config = getattr(vllm_config.model_config, "hf_config", None)
     architectures = getattr(hf_config, "architectures", None) or []
+    parallel_config = vllm_config.parallel_config
     if is_deepseek_v41_architecture(architectures):
         # ### PATCH START: keep V4.1 on the validated text P2P/U1 baseline.
         # The V4.1 wrapper currently owns only the text P2P/CAMP eager U1
@@ -175,6 +176,11 @@ def _fail_if_unsupported_deepseek_v4_features(
                 "DeepSeek-V4.1 AFD Graph/U2 support is pending native DSA graph "
                 "validation"
             )
+        if bool(getattr(parallel_config, "use_ubatching", False)):
+            raise RuntimeError(
+                "DeepSeek-V4.1 AFD U2/DBO support is pending pre_mix-aware "
+                "layer-major scheduling"
+            )
         if getattr(vllm_config, "speculative_config", None) is not None:
             raise RuntimeError(
                 "DeepSeek-V4.1 AFD MTP/DSpark support is pending a role-aware "
@@ -184,7 +190,6 @@ def _fail_if_unsupported_deepseek_v4_features(
 
     from vllm_ascend.utils import is_dspark_config
 
-    parallel_config = vllm_config.parallel_config
     supported_connectors = {
         "CAMP2pAFDConnector",
         "P2pHcclAFDConnector",
