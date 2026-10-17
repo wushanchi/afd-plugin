@@ -11,6 +11,8 @@
 | vLLM-Ascend V4.1 参考 | 本地 checkout `f769db916b53446de5779bced0b7d3d38e8a7540` |
 | cann-recipes-infer | GitCode master `93527538f1567a4cf42db58883231e4e00f8b213` |
 
+参考源码：[cann-recipes-infer V4.1](https://gitcode.com/cann/cann-recipes-infer/tree/93527538f1567a4cf42db58883231e4e00f8b213/models/deepseek_v4_1)、[vLLM-Ascend V4.1](https://github.com/vllm-project/vllm-ascend/tree/f769db916b53446de5779bced0b7d3d38e8a7540/vllm_ascend/models/deepseek_v41)、[V4 AFD 指南](https://gitcode.com/cann/cann-recipes-infer/blob/93527538f1567a4cf42db58883231e4e00f8b213/docs/models/deepseek_v4/deepseek_v4_afd_guide.md)。
+
 GitCode 的 V4.1 代码提供原生 Vision、CSA/DSA、Engram、MoE、量化和 DSpark 路径，没有实现 AFD 的 Attention/FFN 角色、A2F/F2A 数据协议或 `afd-plugin` connector。其 V4 AFD 文档不能直接证明 V4.1 AFD 已经可用。
 
 ## 当前代码阶段
