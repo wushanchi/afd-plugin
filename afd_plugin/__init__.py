@@ -60,6 +60,17 @@ _DEEPSEEK_MODEL_REGISTRATIONS = {
     "DeepseekV4ForCausalLM": (
         "afd_plugin.model_executor.models.deepseek_v4:AFDDeepseekV4ForCausalLM"
     ),
+    # ### PATCH START: register distinct DeepSeek-V4.1 AFD entry points.
+    # DeepSeek-V4.1 has a distinct vLLM-Ascend model implementation (MLA/CSA,
+    # Engram, mHC and the multimodal vision tower).  Keep it on a separate AFD
+    # wrapper path instead of routing it through the V4 adapter.
+    "DeepseekV41ForCausalLM": (
+        "afd_plugin.model_executor.models.deepseek_v41:AFDDeepseekV41ForCausalLM"
+    ),
+    "DeepseekV41VisionForCausalLM": (
+        "afd_plugin.model_executor.models.deepseek_v41:AFDDeepseekV41VisionForCausalLM"
+    ),
+    # ### PATCH END: register distinct DeepSeek-V4.1 AFD entry points.
     "DeepSeekV4MTPModel": (
         "afd_plugin.model_executor.models.deepseek_v4:AFDDeepSeekV4MTP"
     ),

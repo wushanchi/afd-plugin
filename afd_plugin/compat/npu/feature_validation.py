@@ -134,12 +134,15 @@ def _fail_if_unsupported_npu_afd_async_features(
 
 
 def _is_deepseek_v4(vllm_config: VllmConfig) -> bool:
+    # ### PATCH START: recognize DeepSeek-V4 and V4.1 as one validation family.
+    from afd_plugin.model_executor.models.model_utils import (
+        is_deepseek_v4_family_architecture,
+    )
+
     hf_config = getattr(vllm_config.model_config, "hf_config", None)
     architectures = getattr(hf_config, "architectures", None) or []
-    return any(
-        architecture in {"DeepseekV4ForCausalLM", "AFDDeepseekV4ForCausalLM"}
-        for architecture in architectures
-    )
+    # ### PATCH END
+    return is_deepseek_v4_family_architecture(architectures)
 
 
 def _fail_if_unsupported_deepseek_v4_features(
@@ -147,6 +150,38 @@ def _fail_if_unsupported_deepseek_v4_features(
     afd_config: AFDConfig,
 ) -> None:
     """Keep DSV4 AFD inside its validated eager and graph feature boxes."""
+    from afd_plugin.model_executor.models.model_utils import (
+        is_deepseek_v41_architecture,
+    )
+
+    hf_config = getattr(vllm_config.model_config, "hf_config", None)
+    architectures = getattr(hf_config, "architectures", None) or []
+    if is_deepseek_v41_architecture(architectures):
+        # ### PATCH START: keep V4.1 on the validated text P2P/U1 baseline.
+        # The V4.1 wrapper currently owns only the text P2P/CAMP eager U1
+        # contract.  Failing early is safer than entering a V4-only Window,
+        # Graph, MTP or DSpark path with incompatible DSA/Engram state.
+        if afd_config.connector not in {"P2pHcclAFDConnector", "CAMP2pAFDConnector"}:
+            raise RuntimeError(
+                "DeepSeek-V4.1 AFD currently supports only P2pHcclAFDConnector "
+                "or CAMP2pAFDConnector"
+            )
+        if bool(afd_config.compute_gate_on_attention):
+            raise RuntimeError(
+                "DeepSeek-V4.1 AFD P2P/CAMP currently requires FFN-side routing"
+            )
+        if not bool(vllm_config.model_config.enforce_eager):
+            raise RuntimeError(
+                "DeepSeek-V4.1 AFD Graph/U2 support is pending native DSA graph "
+                "validation"
+            )
+        if getattr(vllm_config, "speculative_config", None) is not None:
+            raise RuntimeError(
+                "DeepSeek-V4.1 AFD MTP/DSpark support is pending a role-aware "
+                "draft adapter"
+            )
+        # ### PATCH END
+
     from vllm_ascend.utils import is_dspark_config
 
     parallel_config = vllm_config.parallel_config

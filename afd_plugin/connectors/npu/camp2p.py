@@ -51,6 +51,7 @@ from afd_plugin.connectors.metadata import (
     send_control_payload,
 )
 from afd_plugin.distributed import init_afd_process_group, topology_from_config
+from afd_plugin.model_executor.models.model_utils import architecture_requires_input_ids
 from afd_plugin.v1.worker.dbo import maybe_apply_dbo_yield
 
 if TYPE_CHECKING:
@@ -287,10 +288,9 @@ class CAMP2pAFDConnector(AFDConnectorBase):
         self.num_experts_per_tok = hf_config.num_experts_per_tok
         self.num_routed_experts = hf_config.n_routed_experts
         architectures = getattr(hf_config, "architectures", None) or []
-        self.requires_input_ids = any(
-            architecture in {"DeepseekV4ForCausalLM", "AFDDeepseekV4ForCausalLM"}
-            for architecture in architectures
-        )
+        # ### PATCH START: carry raw token IDs for DSV4/DSV4.1 hash routing.
+        self.requires_input_ids = architecture_requires_input_ids(architectures)
+        # ### PATCH END
         self.vocab_size = int(getattr(hf_config, "vocab_size", 0))
         self.max_num_batched_tokens = int(
             getattr(

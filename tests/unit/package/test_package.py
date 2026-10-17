@@ -35,9 +35,29 @@ def test_deepseek_afd_model_registration_paths_are_lazy_strings():
     assert registrations["DeepseekV4ForCausalLM"] == (
         "afd_plugin.model_executor.models.deepseek_v4:AFDDeepseekV4ForCausalLM"
     )
+    assert registrations["DeepseekV41ForCausalLM"] == (
+        "afd_plugin.model_executor.models.deepseek_v41:AFDDeepseekV41ForCausalLM"
+    )
+    assert registrations["DeepseekV41VisionForCausalLM"] == (
+        "afd_plugin.model_executor.models.deepseek_v41:"
+        "AFDDeepseekV41VisionForCausalLM"
+    )
     assert registrations["DeepSeekV4MTPModel"] == (
         "afd_plugin.model_executor.models.deepseek_v4:AFDDeepSeekV4MTP"
     )
+
+
+def test_deepseek_v41_architecture_contracts_require_raw_ids():
+    pytest.importorskip("vllm")
+    from afd_plugin.model_executor.models.model_utils import (
+        architecture_requires_input_ids,
+        is_deepseek_v41_architecture,
+    )
+
+    assert architecture_requires_input_ids(["DeepseekV41ForCausalLM"])
+    assert architecture_requires_input_ids(["AFDDeepseekV41VisionForCausalLM"])
+    assert is_deepseek_v41_architecture(["DeepseekV41ForCausalLM"])
+    assert not is_deepseek_v41_architecture(["DeepseekV4ForCausalLM"])
 
 
 def test_register_afd_does_not_replace_native_deepseek_model():
@@ -120,6 +140,45 @@ def test_deepseek_v4_mtp_draft_config_uses_private_afd_architecture_copy():
     assert installed is not draft_config
     assert installed.hf_config.architectures == ["AFDDeepSeekV4MTPModel"]
     assert draft_config.hf_config.architectures == ["DeepSeekV4MTPModel"]
+
+
+@pytest.mark.parametrize(
+    "architecture",
+    [
+        "DeepseekV41ForCausalLM",
+        "DeepseekV41VisionForCausalLM",
+    ],
+)
+def test_deepseek_v41_model_config_uses_private_architecture_copy(architecture):
+    pytest.importorskip("vllm")
+    from afd_plugin.model_executor.models.model_utils import get_afd_model_config
+
+    model_config = SimpleNamespace(
+        hf_config=SimpleNamespace(architectures=[architecture]),
+        hf_text_config=SimpleNamespace(),
+    )
+
+    afd_model_config = get_afd_model_config(model_config)
+
+    assert afd_model_config.hf_config.architectures == [f"AFD{architecture}"]
+
+
+@pytest.mark.parametrize(
+    "architecture",
+    [
+        "DeepseekV41ForCausalLM",
+        "AFDDeepseekV41ForCausalLM",
+        "DeepseekV41VisionForCausalLM",
+        "AFDDeepseekV41VisionForCausalLM",
+    ],
+)
+def test_deepseek_v41_architecture_requires_input_ids(architecture):
+    pytest.importorskip("vllm")
+    from afd_plugin.model_executor.models.model_utils import (
+        architecture_requires_input_ids,
+    )
+
+    assert architecture_requires_input_ids([architecture])
 
 
 def test_entry_point_is_registered():

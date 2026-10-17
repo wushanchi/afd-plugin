@@ -61,6 +61,7 @@ from afd_plugin.connectors.metadata import (
     send_control_payload,
 )
 from afd_plugin.distributed import build_rank_mapping, init_afd_process_group
+from afd_plugin.model_executor.models.model_utils import architecture_requires_input_ids
 from afd_plugin.v1.worker.dbo import maybe_apply_dbo_yield
 
 if TYPE_CHECKING:
@@ -331,10 +332,9 @@ class P2pHcclAFDConnector(AFDConnectorBase):
             vllm_config.scheduler_config.max_num_batched_tokens,
         )
         architectures = vllm_config.model_config.hf_config.architectures or []
-        self.requires_input_ids = any(
-            architecture in {"DeepseekV4ForCausalLM", "AFDDeepseekV4ForCausalLM"}
-            for architecture in architectures
-        )
+        # ### PATCH START: carry raw token IDs for DSV4/DSV4.1 hash routing.
+        self.requires_input_ids = architecture_requires_input_ids(architectures)
+        # ### PATCH END
         speculative_config = getattr(vllm_config, "speculative_config", None)
         self.requires_mtp = (
             speculative_config is not None
