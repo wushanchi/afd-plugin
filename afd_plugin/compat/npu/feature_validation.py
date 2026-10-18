@@ -152,13 +152,12 @@ def _fail_if_unsupported_deepseek_v4_features(
     """Keep DSV4 AFD inside its validated eager and graph feature boxes."""
     from afd_plugin.model_executor.models.model_utils import (
         is_deepseek_v41_architecture,
+        is_dspark_config,
     )
 
     hf_config = getattr(vllm_config.model_config, "hf_config", None)
     architectures = getattr(hf_config, "architectures", None) or []
     parallel_config = vllm_config.parallel_config
-    from afd_plugin.model_executor.models.model_utils import is_dspark_config
-
     if is_deepseek_v41_architecture(architectures):
         # ### PATCH START: validate V4.1 role-aware eager paths.
         # Window now has a native V4.1 gate/MoE wrapper; Graph, Engram and
@@ -206,9 +205,7 @@ def _fail_if_unsupported_deepseek_v4_features(
                     "DeepSeek-V4.1 eager U2 requires exactly two ubatches"
                 )
         speculative_config = getattr(vllm_config, "speculative_config", None)
-        uses_dspark = bool(
-            speculative_config is not None and is_dspark_config(vllm_config)
-        )
+        uses_dspark = is_dspark_config(vllm_config)
         if uses_dspark:
             if afd_config.connector != "P2pHcclAFDConnector":
                 raise RuntimeError(

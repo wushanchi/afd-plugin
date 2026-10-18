@@ -117,9 +117,6 @@ def _iter_role_weights(
 class AFDDeepseekV41RemoteMoEProxy(RemoteFFNProxy):
     """Parameter-free V4.1 MoE stage executed by the remote FFN role."""
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        return self._send_and_receive(hidden_states)
-
     def dispatch_remote_ffn(
         self,
         hidden_states: torch.Tensor,
@@ -560,7 +557,7 @@ class AFDDeepseekV41Model(native.DeepseekV41Model):
             topology = native.build_layer_plan(config)
             max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
 
-            def make_shared_attention_state() -> Any:
+            def make_shared_attention_state(indices: torch.Tensor) -> Any:
                 candidate = torch.full(
                     (max_tokens, 1, topology.candidate_topk_blocks),
                     -1,
@@ -568,7 +565,7 @@ class AFDDeepseekV41Model(native.DeepseekV41Model):
                     device=self.topk_indices_buffer.device,
                 )
                 return native.DeepseekV41SharedAttentionState(
-                    torch.empty_like(self.topk_indices_buffer),
+                    indices,
                     candidate,
                     torch.zeros(
                         (max_tokens, 1),
@@ -586,26 +583,10 @@ class AFDDeepseekV41Model(native.DeepseekV41Model):
             # buffer lets stage 1 overwrite stage 0's sparse indices before
             # the next layer consumes them, so each stage owns one state.
             self._shared_attention_states = {
-                0: native.DeepseekV41SharedAttentionState(
-                    self.topk_indices_buffer,
-                    torch.full(
-                        (max_tokens, 1, topology.candidate_topk_blocks),
-                        -1,
-                        dtype=torch.int32,
-                        device=self.topk_indices_buffer.device,
-                    ),
-                    torch.zeros(
-                        (max_tokens, 1),
-                        dtype=torch.int32,
-                        device=self.topk_indices_buffer.device,
-                    ),
-                    torch.zeros(
-                        (max_tokens, 1),
-                        dtype=torch.int32,
-                        device=self.topk_indices_buffer.device,
-                    ),
+                0: make_shared_attention_state(self.topk_indices_buffer),
+                1: make_shared_attention_state(
+                    torch.empty_like(self.topk_indices_buffer),
                 ),
-                1: make_shared_attention_state(),
             }
             self.shared_attention_states = self._shared_attention_states
             self.shared_attention_state = self._shared_attention_states[0]

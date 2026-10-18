@@ -230,6 +230,9 @@ def compute_v41_window_gate(
     tid2eid = getattr(gate, "tid2eid", None)
     bias_vl = getattr(gate, "bias_vl", None)
     scoring_func = getattr(config, "scoring_func", "softmax")
+    norm_topk = bool(getattr(config, "norm_topk_prob", True))
+    k_group = int(getattr(config, "topk_group", 1))
+    group_count = int(getattr(config, "n_group", 1))
     if tid2eid is not None or bias_vl is not None:
         if input_ids is None:
             raise RuntimeError(
@@ -248,7 +251,7 @@ def compute_v41_window_gate(
                 bias_vl=bias_vl,
                 text_bias=bias,
                 top_k=top_k,
-                renormalize=bool(getattr(config, "norm_topk_prob", True)),
+                renormalize=norm_topk,
                 routed_scaling_factor=1.0,
                 image_sentinel_lo=int(
                     getattr(config, "image_sentinel_base_id", 129257)
@@ -260,8 +263,8 @@ def compute_v41_window_gate(
             bias=bias,
             input_ids=input_ids,
             tid2eid=tid2eid.to(torch.int32),
-            k_group=int(getattr(config, "topk_group", 1)),
-            group_count=int(getattr(config, "n_group", 1)),
+            k_group=k_group,
+            group_count=group_count,
             routed_scaling_factor=1.0,
             eps=1e-20,
             group_select_mode=1,
@@ -269,7 +272,7 @@ def compute_v41_window_gate(
             norm_type=2,
             out_flag=False,
         )
-        if bool(getattr(config, "norm_topk_prob", True)):
+        if norm_topk:
             topk_weights = topk_weights / topk_weights.sum(
                 dim=-1, keepdim=True
             ).clamp_min(1e-20)
@@ -279,10 +282,10 @@ def compute_v41_window_gate(
     topk_weights, topk_ids, _ = DeviceOperator.moe_gating_top_k(
         router_logits,
         k=top_k,
-        k_group=int(getattr(config, "topk_group", 1)),
-        group_count=int(getattr(config, "n_group", 1)),
+        k_group=k_group,
+        group_count=group_count,
         group_select_mode=1,
-        renorm=int(bool(getattr(config, "norm_topk_prob", True))),
+        renorm=int(norm_topk),
         norm_type=norm_type,
         out_flag=False,
         routed_scaling_factor=1.0,
@@ -379,20 +382,19 @@ def compute_v41_window_ffn(
 
     quant_type = holder.quant_type
     mxfp = None
-    if quant_type in (
-        QuantType.W8A8MXFP,
+    float4_quant_types = (
         QuantType.W4A4MXFP,
         QuantType.W4A8MXFP,
         QuantType.W4A16MXFP,
-    ):
+    )
+    if quant_type in (QuantType.W8A8MXFP, *float4_quant_types):
         import torch_npu
 
         mxfp = MoEMxfpParams(
             act_quant_type=torch.float8_e4m3fn,
             weight_quant_type=(
                 torch_npu.float4_e2m1fn_x2
-                if quant_type
-                in (QuantType.W4A4MXFP, QuantType.W4A8MXFP, QuantType.W4A16MXFP)
+                if quant_type in float4_quant_types
                 else torch.float8_e4m3fn
             ),
             scale_dtype=torch_npu.float8_e8m0fnu,

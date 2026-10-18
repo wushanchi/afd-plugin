@@ -20,10 +20,8 @@ if TYPE_CHECKING:
 # name remains in the native model configuration.  DeepSeek-V4 and V4.1 use
 # the token IDs for their hash/Engram routing contract, so connectors must
 # make the decision from either spelling.
-DEEPSEEK_INPUT_IDS_ARCHITECTURES = frozenset(
+DEEPSEEK_V41_ARCHITECTURES = frozenset(
     {
-        "DeepseekV4ForCausalLM",
-        "AFDDeepseekV4ForCausalLM",
         "DeepseekV41ForCausalLM",
         "AFDDeepseekV41ForCausalLM",
         "DeepseekV41VisionForCausalLM",
@@ -31,17 +29,11 @@ DEEPSEEK_INPUT_IDS_ARCHITECTURES = frozenset(
     },
 )
 
-
+# Every DeepSeek-V4-family variant currently consumes token IDs.
 DEEPSEEK_V4_FAMILY_ARCHITECTURES = frozenset(
-    {
-        "DeepseekV4ForCausalLM",
-        "AFDDeepseekV4ForCausalLM",
-        "DeepseekV41ForCausalLM",
-        "AFDDeepseekV41ForCausalLM",
-        "DeepseekV41VisionForCausalLM",
-        "AFDDeepseekV41VisionForCausalLM",
-    },
-)
+    {"DeepseekV4ForCausalLM", "AFDDeepseekV4ForCausalLM"},
+) | DEEPSEEK_V41_ARCHITECTURES
+DEEPSEEK_INPUT_IDS_ARCHITECTURES = DEEPSEEK_V4_FAMILY_ARCHITECTURES
 
 
 def architecture_requires_input_ids(architectures: Iterable[str] | None) -> bool:
@@ -71,13 +63,7 @@ def is_deepseek_v41_architecture(architectures: Iterable[str] | None) -> bool:
     """Return whether an architecture uses the V4.1 native model contract."""
 
     return any(
-        architecture
-        in {
-            "DeepseekV41ForCausalLM",
-            "AFDDeepseekV41ForCausalLM",
-            "DeepseekV41VisionForCausalLM",
-            "AFDDeepseekV41VisionForCausalLM",
-        }
+        architecture in DEEPSEEK_V41_ARCHITECTURES
         for architecture in (architectures or ())
     )
 
