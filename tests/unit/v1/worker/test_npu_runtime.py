@@ -3233,6 +3233,19 @@ def _dsv4_config(**kwargs):
     return config
 
 
+def _dsv41_config(**kwargs):
+    config = _vllm_config(
+        architecture="DeepseekV41ForCausalLM",
+        **kwargs,
+    )
+    config.additional_config["afd"].update(
+        connector="P2pHcclAFDConnector",
+        num_attention_ranks=1,
+        num_ffn_ranks=1,
+    )
+    return config
+
+
 def _mtp_speculative_config(**overrides):
     values = {
         "method": "mtp",
@@ -3285,6 +3298,40 @@ def test_dsv4_feature_validation_accepts_eager_u2_camp2p():
             ubatch_size=2,
         )
     )
+
+
+def test_dsv41_feature_validation_accepts_eager_u2_hccl_p2p():
+    fail_if_unsupported_npu_afd_features(
+        _dsv41_config(
+            enable_dbo=True,
+            use_ubatching=True,
+            num_ubatches=2,
+            ubatch_size=2,
+        )
+    )
+
+
+def test_dsv41_feature_validation_rejects_eager_u2_camp2p():
+    config = _dsv41_config(
+        enable_dbo=True,
+        use_ubatching=True,
+        num_ubatches=2,
+        ubatch_size=2,
+    )
+    config.additional_config["afd"]["connector"] = "CAMP2pAFDConnector"
+    with pytest.raises(RuntimeError, match="only P2pHcclAFDConnector"):
+        fail_if_unsupported_npu_afd_features(config)
+
+
+def test_dsv41_feature_validation_rejects_eager_u2_non_two_stage():
+    config = _dsv41_config(
+        enable_dbo=True,
+        use_ubatching=True,
+        num_ubatches=1,
+        ubatch_size=2,
+    )
+    with pytest.raises(RuntimeError, match="exactly two ubatches"):
+        fail_if_unsupported_npu_afd_features(config)
 
 
 @pytest.mark.parametrize("use_ubatching", [False, True])

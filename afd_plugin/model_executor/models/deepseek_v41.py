@@ -12,12 +12,13 @@ operator contracts are validated against the matching vLLM-Ascend release.
 from __future__ import annotations
 
 from collections.abc import Iterable, Iterator
+from itertools import islice
 from typing import Any
 
 import torch
 import torch.nn as nn
 from vllm.config import VllmConfig
-from vllm.forward_context import get_forward_context
+from vllm.forward_context import get_forward_context, override_forward_context
 from vllm_ascend.models.deepseek_v41 import model as native
 from vllm_ascend.models.deepseek_v41 import vl_model as native_vl
 
@@ -224,6 +225,36 @@ class AFDDeepseekV41DecoderLayer(native.DeepseekV41DecoderLayer):
         llama_4_scaling=None,
         input_ids=None,
     ):
+        x, continuation = self.forward_attention_to_remote_ffn(
+            positions,
+            hidden_states,
+            pre_mix,
+            llama_4_scaling,
+            input_ids=input_ids,
+        )
+        return self.complete_remote_ffn(x, continuation)
+
+    # Patch reason: layer-major U2 must split V4.1 before the remote FFN HC
+    # post while preserving the delayed ``pre_mix`` for the next layer.
+    # Patch functionality: expose the Attention-side prefix and return the
+    # connector-backed F2A tensor plus its V4.1 continuation state.
+    # Signature: matches the adapter-local forward contract; no new caller
+    # parameters beyond the native ``input_ids`` side channel.
+    def forward_attention_to_remote_ffn(
+        self,
+        positions,
+        hidden_states,
+        pre_mix,
+        llama_4_scaling=None,
+        *,
+        input_ids=None,
+    ):
+        """Run Attention and dispatch the normalized MoE input.
+
+        The returned continuation keeps the FFN-side mHC state alive until
+        the matching F2A receive.  This is the V4.1 equivalent of the V4
+        layer-major U2 split and is also used by the ordinary U1 path.
+        """
         if self.afd_role != _ATTENTION_ROLE:
             raise RuntimeError("DeepSeek-V4.1 FFN model execution is connector-driven")
         residual = hidden_states
@@ -255,8 +286,17 @@ class AFDDeepseekV41DecoderLayer(native.DeepseekV41DecoderLayer):
             x,
             input_ids=input_ids if self.layer_idx == 0 else None,
         )
-        x = self.mlp.receive_remote_ffn(transfer, layer_idx=self.layer_idx)
-        return self.hc_post(x, residual, ffn_post, ffn_comb), ffn_pre
+        ffn_output = self.mlp.receive_remote_ffn(transfer, layer_idx=self.layer_idx)
+        return ffn_output, (residual, ffn_post, ffn_comb, ffn_pre)
+
+    # Patch reason: U2 completes the remote F2A tensor after the connector
+    # dependency is consumed by the current Attention stream.
+    # Patch functionality: finish FFN HC post and return the next layer's
+    # V4.1 ``pre_mix`` state.
+    # Signature: adapter-local continuation helper.
+    def complete_remote_ffn(self, ffn_output, continuation):
+        residual, post, comb, pre_mix = continuation
+        return self.hc_post(ffn_output, residual, post, comb), pre_mix
 
     def compute_ffn_output(
         self,
@@ -421,6 +461,165 @@ class AFDDeepseekV41Model(native.DeepseekV41Model):
         hidden_states = native.DeepseekV41DecoderLayer.hc_collapse(hidden_states, pre_mix)
         return self.norm(hidden_states)
 
+    # Patch reason: native V4.1 has no AFD layer-major execution entry point.
+    # Patch functionality: run two P2P HCCL ubatches while carrying one
+    # ``pre_mix`` tensor and one deferred F2A continuation per stage.
+    # Signature: matches ``AscendUBatchWrapper``'s model hook.
+    def forward_ubatches_layer_major(self, ubatch_metadata: list[Any]) -> list[Any]:
+        """Run two V4.1 micro-batches layer-major with deferred F2A receives.
+
+        V4.1's ``pre_mix`` is the output of the previous layer's FFN HC
+        pre-stage, so each micro-batch carries its own value alongside the
+        hidden state.  The connector receive is enqueued by the layer and is
+        consumed through ``wait_for_attention_stage_receive`` before the
+        pending HC post is completed.
+        """
+        if self.afd_role != _ATTENTION_ROLE:
+            raise RuntimeError("DeepSeek-V4.1 FFN model execution is connector-driven")
+        if len(ubatch_metadata) != 2:
+            raise RuntimeError(
+                "DeepSeek-V4.1 layer-major execution requires exactly two stages; "
+                f"got {len(ubatch_metadata)}"
+            )
+
+        stage_contexts = [item.context.forward_context for item in ubatch_metadata]
+        connectors = []
+        for stage_idx, (item, forward_context) in enumerate(
+            zip(ubatch_metadata, stage_contexts, strict=True)
+        ):
+            afd_metadata = (forward_context.additional_kwargs or {}).get("afd_metadata")
+            connector = getattr(afd_metadata, "connector", None)
+            if connector is None:
+                raise RuntimeError(
+                    "DeepSeek-V4.1 layer-major U2 requires AFD connector metadata"
+                )
+            if int(getattr(forward_context, "ubatch_idx", -1)) != stage_idx:
+                raise RuntimeError(
+                    "DeepSeek-V4.1 layer-major stage context order is invalid: "
+                    f"expected={stage_idx} actual="
+                    f"{getattr(forward_context, 'ubatch_idx', None)}"
+                )
+            forward_context.input_ids = item.input_ids
+            forward_context.afd_layer_major_u2 = True
+            connectors.append(connector)
+
+        connector = connectors[0]
+        if any(stage_connector is not connector for stage_connector in connectors[1:]):
+            raise RuntimeError("DeepSeek-V4.1 layer-major U2 stages must share one connector")
+        require_idle = getattr(connector, "require_attention_pipeline_idle", None)
+        wait_for_receive = getattr(connector, "wait_for_attention_stage_receive", None)
+        reset_pipeline = getattr(connector, "reset_attention_pipeline_state", None)
+        if not all(callable(method) for method in (require_idle, wait_for_receive)):
+            raise RuntimeError(
+                "DeepSeek-V4.1 layer-major U2 requires the HCCL stream connector"
+            )
+
+        hidden_ubatches: list[torch.Tensor] = []
+        pre_mix_ubatches: list[torch.Tensor] = []
+        pending_layers: list[AFDDeepseekV41DecoderLayer | None] = [None, None]
+        pending_continuations: list[tuple[torch.Tensor, ...] | None] = [None, None]
+        require_idle()
+        try:
+            for item, forward_context in zip(
+                ubatch_metadata, stage_contexts, strict=True
+            ):
+                with override_forward_context(forward_context):
+                    if native.get_pp_group().is_first_rank:
+                        hidden_states = (
+                            item.inputs_embeds
+                            if item.inputs_embeds is not None
+                            else self.embed_input_ids(item.input_ids)
+                        )
+                        hidden_states = hidden_states.unsqueeze(1).repeat(
+                            1, self.hc_mult, 1
+                        )
+                    else:
+                        if item.intermediate_tensors is None:
+                            raise RuntimeError("pipeline stage requires intermediate tensors")
+                        hidden_states = item.intermediate_tensors["hidden_states"]
+                hidden_ubatches.append(hidden_states)
+                pre_mix = hidden_states.new_zeros(
+                    hidden_states.shape[0], self.hc_mult, dtype=torch.float32
+                )
+                pre_mix[:, 0] = 1.0
+                pre_mix_ubatches.append(pre_mix)
+
+            for layer_offset, layer in enumerate(
+                islice(self.layers, self.start_layer, self.end_layer)
+            ):
+                for stage_idx, (item, forward_context) in enumerate(
+                    zip(ubatch_metadata, stage_contexts, strict=True)
+                ):
+                    with override_forward_context(forward_context):
+                        if layer_offset > 0:
+                            wait_for_receive(
+                                stage_idx=stage_idx,
+                                tensor=hidden_ubatches[stage_idx],
+                            )
+                            pending_layer = pending_layers[stage_idx]
+                            continuation = pending_continuations[stage_idx]
+                            if pending_layer is None or continuation is None:
+                                raise RuntimeError(
+                                    "DeepSeek-V4.1 layer-major stage has no "
+                                    f"pending layer: stage={stage_idx}"
+                                )
+                            hidden_states, pre_mix = pending_layer.complete_remote_ffn(
+                                hidden_ubatches[stage_idx], continuation
+                            )
+                            hidden_ubatches[stage_idx] = hidden_states
+                            pre_mix_ubatches[stage_idx] = pre_mix
+
+                        hidden_states, continuation = layer.forward_attention_to_remote_ffn(
+                            item.positions,
+                            hidden_ubatches[stage_idx],
+                            pre_mix_ubatches[stage_idx],
+                            None,
+                            input_ids=item.input_ids,
+                        )
+                        hidden_ubatches[stage_idx] = hidden_states
+                        pending_layers[stage_idx] = layer
+                        pending_continuations[stage_idx] = continuation
+
+            for stage_idx, forward_context in enumerate(stage_contexts):
+                with override_forward_context(forward_context):
+                    wait_for_receive(
+                        stage_idx=stage_idx,
+                        tensor=hidden_ubatches[stage_idx],
+                    )
+                    pending_layer = pending_layers[stage_idx]
+                    continuation = pending_continuations[stage_idx]
+                    if pending_layer is None or continuation is None:
+                        raise RuntimeError(
+                            "DeepSeek-V4.1 layer-major stage has no final pending layer: "
+                            f"stage={stage_idx}"
+                        )
+                    hidden_ubatches[stage_idx], _ = pending_layer.complete_remote_ffn(
+                        hidden_ubatches[stage_idx], continuation
+                    )
+        except BaseException:
+            if callable(reset_pipeline):
+                reset_pipeline()
+            raise
+
+        if not native.get_pp_group().is_last_rank:
+            return [
+                native.IntermediateTensors({"hidden_states": hidden_states})
+                for hidden_states in hidden_ubatches
+            ]
+
+        outputs: list[Any] = []
+        for stage_idx, forward_context in enumerate(stage_contexts):
+            with override_forward_context(forward_context):
+                pre_mix = pre_mix_ubatches[stage_idx]
+                outputs.append(
+                    self.norm(
+                        native.DeepseekV41DecoderLayer.hc_collapse(
+                            hidden_ubatches[stage_idx], pre_mix
+                        )
+                    )
+                )
+        return outputs
+
     def compute_ffn_output(self, hidden_states: torch.Tensor, layer_idx: int, **kwargs: Any):
         return self.layers[layer_idx].compute_ffn_output(hidden_states, **kwargs)
 
@@ -483,6 +682,14 @@ class AFDDeepseekV41ForCausalLM(native.AscendDeepseekV41LLMForCausalLM):
             inputs_embeds,
             **kwargs,
         )
+
+    # Patch reason: ``AscendUBatchWrapper`` is installed around the CausalLM
+    # object, while the layer-major implementation belongs to the backbone.
+    # Patch functionality: expose the backbone hook without duplicating the
+    # U2 scheduler implementation.
+    # Signature: matches the wrapper hook used by the NPU model runner.
+    def forward_ubatches_layer_major(self, ubatch_metadata: list[Any]) -> list[Any]:
+        return self.model.forward_ubatches_layer_major(ubatch_metadata)
 
     def prepare_engram_inputs(self, *args, **kwargs):
         raise RuntimeError("DeepSeek-V4.1 AFD Engram transport is not implemented")

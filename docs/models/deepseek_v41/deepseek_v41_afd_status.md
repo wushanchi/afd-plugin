@@ -22,17 +22,21 @@ GitCode 的 V4.1 代码提供原生 Vision、CSA/DSA、Engram、MoE、量化和 
 - 文本请求；
 - P2P 或 CAMP AFD connector；
 - eager、U1；
+- `P2pHcclAFDConnector` 的 eager U2/DBO（固定两个 ubatch，layer-major 调度）；
 - Attention 侧保留原生 V4.1 attention/HC，FFN 侧保留原生 V4.1 MoE；
 - 第 0 层通过现有 ID side-channel 传递 `input_ids`，让原生 hash routing 能够运行。
 
 实现明确拒绝以下路径，避免把 V4 的协议误用到 V4.1：
 
-- WindowAFDConnector、Attention-side gate、Graph/U2；
+- WindowAFDConnector、Attention-side gate、Graph U2；
 - MTP/DSpark；
 - Engram transfer；
 - 需要跨角色传递 `image_mask`、视觉路由状态或 Engram hash 的扩展协议。
 
-配置校验会在进入模型构造前拒绝 `use_ubatching/DBO`，因为 V4.1 的 `pre_mix` 和 shared-attention state 尚未接入现有 V4 layer-major U2 调度。
+配置校验会在进入模型构造前拒绝 Window/Graph U2，以及 CAMP U2；P2P U2 仅接受
+`enforce_eager=true`、`num_ubatches=2` 和 FFN-side gate。V4.1 的 layer-major
+调度为每个 micro-batch 独立保存 `pre_mix`，并复用 HCCL stream connector 的延迟
+F2A receive 生命周期；该路径目前只有静态契约证据，仍需目标 NPU 验证。
 
 Vision wrapper 目前只复用了原生图像编码和语言模型入口，跨 AFD 的图像元数据、视觉 bias 和图像请求精度仍为 `Pending-NPU`。
 
@@ -45,7 +49,7 @@ V4.1 原生实现与当前 V4 AFD README 中的 `vLLM 0.26.0 + vLLM-Ascend 80d8c
 1. vLLM、vLLM-Ascend、CANN、驱动固件、`torch_npu`、TorchAir 的成套版本确认；
 2. `torch.ops._C_ascend.npu_hc_pre_v3`、`npu_hc_post`、DSA/CSA cache、MoE 和量化算子存在并通过最小 eager smoke test；
 3. HCCL/Gloo 控制面端口、rank 映射、NPU 可见性和 HBM 余量确认；
-4. 关闭 Engram/DSpark/Graph 选项，先完成文本 P2P U1 的单卡双角色验证。
+4. 关闭 Engram/DSpark/Graph 选项，先完成文本 P2P U1，再验证 P2P eager U2 的双角色通信。
 
 当前 `afd-plugin/csrc/npu` 的自定义 A2E/E2A 构建脚本仍按 Ascend 910C 型号限制；它不能直接作为 Ascend 950/A5 的算子包。A5 适配必须提供对应 ACLNN/通信算子实现、编译目标和 ABI 验证，否则 Python wrapper 即使能够导入，也不能称为可运行的 NPU AFD。
 

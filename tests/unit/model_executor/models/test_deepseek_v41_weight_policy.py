@@ -7,6 +7,7 @@ import pytest
 pytest.importorskip("vllm_ascend")
 
 from afd_plugin.model_executor.models.deepseek_v41 import (  # noqa: E402
+    AFDDeepseekV41ForCausalLM,
     _checkpoint_weight_roles,
     _iter_role_weights,
 )
@@ -53,3 +54,9 @@ def test_role_weight_iterator_is_one_shot_and_filters_layer_count():
     )
     assert [name for name, _ in selected] == ["model.layers.0.mlp.gate.weight"]
     assert weights.consumed
+
+
+def test_v41_causal_lm_exposes_layer_major_u2_hook():
+    """The NPU ubatch wrapper is installed around the CausalLM object."""
+
+    assert callable(AFDDeepseekV41ForCausalLM.forward_ubatches_layer_major)

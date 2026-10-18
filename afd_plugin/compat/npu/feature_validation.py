@@ -177,10 +177,14 @@ def _fail_if_unsupported_deepseek_v4_features(
                 "validation"
             )
         if bool(getattr(parallel_config, "use_ubatching", False)):
-            raise RuntimeError(
-                "DeepSeek-V4.1 AFD U2/DBO support is pending pre_mix-aware "
-                "layer-major scheduling"
-            )
+            if afd_config.connector != "P2pHcclAFDConnector":
+                raise RuntimeError(
+                    "DeepSeek-V4.1 eager U2 supports only P2pHcclAFDConnector"
+                )
+            if int(getattr(parallel_config, "num_ubatches", 1)) != 2:
+                raise RuntimeError(
+                    "DeepSeek-V4.1 eager U2 requires exactly two ubatches"
+                )
         if getattr(vllm_config, "speculative_config", None) is not None:
             raise RuntimeError(
                 "DeepSeek-V4.1 AFD MTP/DSpark support is pending a role-aware "
