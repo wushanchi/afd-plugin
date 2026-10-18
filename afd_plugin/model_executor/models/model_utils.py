@@ -82,6 +82,31 @@ def is_deepseek_v41_architecture(architectures: Iterable[str] | None) -> bool:
     )
 
 
+def is_dspark_config(vllm_config: VllmConfig) -> bool:
+    """Detect the native DSpark speculative configuration across ABI versions.
+
+    Recent vLLM exposes ``SpeculativeConfig.use_dspark()`` while older
+    vLLM-Ascend releases exported a utility with the same name.  Keeping the
+    compatibility decision in the plugin avoids importing a helper that is
+    absent from the pinned native release.
+    """
+
+    speculative_config = getattr(vllm_config, "speculative_config", None)
+    if speculative_config is None:
+        return False
+    use_dspark = getattr(speculative_config, "use_dspark", None)
+    if callable(use_dspark):
+        return bool(use_dspark())
+    try:
+        from vllm_ascend import utils as ascend_utils
+    except ImportError:
+        return False
+    native_helper = getattr(ascend_utils, "is_dspark_config", None)
+    if callable(native_helper):
+        return bool(native_helper(vllm_config))
+    return False
+
+
 # ### PATCH END: centralize DeepSeek-V4/V4.1 architecture contracts.
 
 

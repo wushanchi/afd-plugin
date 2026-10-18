@@ -6,7 +6,7 @@
 
 | 项目 | 版本/证据 |
 | --- | --- |
-| AFD 插件 | `asyn-opt`，基线 HEAD `4a587aa1871db68ed3f1ab33bc88746fc36894d6` |
+| AFD 插件 | `asyn-opt`，本轮开发基线 HEAD `5df2916cb54f422eba54e1d5c874185d7218633d` |
 | AFD 远端 | `https://github.com/wushanchi/afd-plugin.git`，目标分支 `asyn-opt` |
 | vLLM-Ascend V4.1 参考 | 本地 checkout `f769db916b53446de5779bced0b7d3d38e8a7540` |
 | cann-recipes-infer | GitCode master `93527538f1567a4cf42db58883231e4e00f8b213` |
@@ -23,22 +23,35 @@ GitCode 的 V4.1 代码提供原生 Vision、CSA/DSA、Engram、MoE、量化和 
 - P2P 或 CAMP AFD connector；
 - eager、U1；
 - `P2pHcclAFDConnector` 的 eager U2/DBO（固定两个 ubatch，layer-major 调度）；
+- `WindowAFDConnector` 的同步 U1：Attention-side V4.1 gate、384 routed expert 的连续 rank 映射、独立 shared-expert rank 和 type-2 group-list 归一化；
 - Attention 侧保留原生 V4.1 attention/HC，FFN 侧保留原生 V4.1 MoE；
 - 第 0 层通过现有 ID side-channel 传递 `input_ids`，让原生 hash routing 能够运行。
 
 实现明确拒绝以下路径，避免把 V4 的协议误用到 V4.1：
 
-- WindowAFDConnector、Attention-side gate、Graph U2；
-- MTP/DSpark；
+- WindowAFDConnector 的同步 U1 和 async/U2 packed-global-FFN 入口已经接入，但代码均需真实 NPU 验证；Graph U2 仍拒绝；
+- 通用 MTP/远端 draft FFN；DSpark 仅保留 Attention 本地 draft，目标侧 target hidden capture 已接入但仍需 NPU 验证；
 - Engram transfer；
 - 需要跨角色传递 `image_mask`、视觉路由状态或 Engram hash 的扩展协议。
 
-配置校验会在进入模型构造前拒绝 Window/Graph U2，以及 CAMP U2；P2P U2 仅接受
-`enforce_eager=true`、`num_ubatches=2` 和 FFN-side gate。V4.1 的 layer-major
+配置校验会在进入模型构造前拒绝 Graph U2，以及未完成元数据适配的 CAMP U2；P2P eager U2 接受
+`enforce_eager=true`、`num_ubatches=2` 和 FFN-side gate，Window eager U2 使用
+Attention-side gate 和相同的两个 ubatch 约束。V4.1 的 layer-major
 调度为每个 micro-batch 独立保存 `pre_mix`，并复用 HCCL stream connector 的延迟
 F2A receive 生命周期；该路径目前只有静态契约证据，仍需目标 NPU 验证。
 
 Vision wrapper 目前只复用了原生图像编码和语言模型入口，跨 AFD 的图像元数据、视觉 bias 和图像请求精度仍为 `Pending-NPU`。
+
+### DSpark 边界（静态实现）
+
+V4.1 DSpark 的 native draft 架构是 `DeepseekV41DSparkModel`，由
+vLLM-Ascend 保持在 Attention 角色本地运行。AFD 目标 wrapper 只采集
+`dspark_target_layer_ids` 对应层进入层前的 HC 状态（每层执行
+`hidden_states.mean(dim=1)`，按 checkpoint 顺序拼接），不通过 A2F/F2A
+传输 draft hidden。配置校验仅允许 Attention + `P2pHcclAFDConnector` +
+eager + `num_speculative_tokens == dspark_block_size` 的 DSpark 组合；通用
+MTP 仍拒绝。该路径已经有 CPU 契约测试和静态 shape 检查，但没有真实
+DSpark draft、HCCL、CANN 算子或 NPU 精度证据，状态仍为 `Pending-NPU`。
 
 ## 必须满足的运行条件
 
@@ -67,7 +80,7 @@ P2P/U1 只传递 hidden states，并在第 0 层传递 `input_ids`。要达到 V
 - DSpark target hidden states、draft layer 和 speculative step；
 - Window 的 384 expert layout、type-2 group list、dynamic scale、shared expert 和 U2 slot reuse。
 
-Window 当前还有容量条件：`micro_batch_num` 只能为 1/2、`max_num_batched_tokens <= 512`、top-k 不超过 16、shared expert 必须为 1；40 层和 384 experts 在现有全局 GMM group 上限下可能需要增加 FFN rank，必须按真实 DP/TP/EP 拓扑重新计算。
+Window 当前还有容量条件：`micro_batch_num` 只能为 1/2、`max_num_batched_tokens <= 512`、top-k 不超过 16、shared expert 必须为 1；async/U2 使用跨层 packed-global-FFN 和 U2 slot 生命周期，代码入口已复用 V4 的 MXFP GMM helper，但仍需真实 NPU 验证。40 层和 384 experts 在现有全局 GMM group 上限下可能需要增加 FFN rank，必须按真实 DP/TP/EP 拓扑重新计算。
 
 ## 验证门禁
 

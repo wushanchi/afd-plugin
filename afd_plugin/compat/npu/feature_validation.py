@@ -157,42 +157,103 @@ def _fail_if_unsupported_deepseek_v4_features(
     hf_config = getattr(vllm_config.model_config, "hf_config", None)
     architectures = getattr(hf_config, "architectures", None) or []
     parallel_config = vllm_config.parallel_config
+    from afd_plugin.model_executor.models.model_utils import is_dspark_config
+
     if is_deepseek_v41_architecture(architectures):
-        # ### PATCH START: keep V4.1 on the validated text P2P/U1 baseline.
-        # The V4.1 wrapper currently owns only the text P2P/CAMP eager U1
-        # contract.  Failing early is safer than entering a V4-only Window,
-        # Graph, MTP or DSpark path with incompatible DSA/Engram state.
-        if afd_config.connector not in {"P2pHcclAFDConnector", "CAMP2pAFDConnector"}:
+        # ### PATCH START: validate V4.1 role-aware eager paths.
+        # Window now has a native V4.1 gate/MoE wrapper; Graph, Engram and
+        # generic MTP still require their own metadata transport.
+        if afd_config.connector not in {
+            "P2pHcclAFDConnector",
+            "CAMP2pAFDConnector",
+            "WindowAFDConnector",
+        }:
             raise RuntimeError(
-                "DeepSeek-V4.1 AFD currently supports only P2pHcclAFDConnector "
-                "or CAMP2pAFDConnector"
+                "DeepSeek-V4.1 AFD currently supports only P2pHcclAFDConnector, "
+                "CAMP2pAFDConnector, or WindowAFDConnector"
             )
-        if bool(afd_config.compute_gate_on_attention):
+        if (
+            bool(afd_config.compute_gate_on_attention)
+            and afd_config.connector != "WindowAFDConnector"
+        ):
             raise RuntimeError(
                 "DeepSeek-V4.1 AFD P2P/CAMP currently requires FFN-side routing"
             )
+        if (
+            afd_config.connector == "WindowAFDConnector"
+            and not bool(afd_config.compute_gate_on_attention)
+        ):
+            raise RuntimeError(
+                "DeepSeek-V4.1 Window AFD requires "
+                "compute_gate_on_attention=true"
+            )
         if not bool(vllm_config.model_config.enforce_eager):
             raise RuntimeError(
-                "DeepSeek-V4.1 AFD Graph/U2 support is pending native DSA graph "
+                "DeepSeek-V4.1 AFD Graph execution is pending native DSA graph "
                 "validation"
             )
         if bool(getattr(parallel_config, "use_ubatching", False)):
-            if afd_config.connector != "P2pHcclAFDConnector":
+            if afd_config.connector not in {
+                "P2pHcclAFDConnector",
+                "WindowAFDConnector",
+            }:
                 raise RuntimeError(
-                    "DeepSeek-V4.1 eager U2 supports only P2pHcclAFDConnector"
+                    "DeepSeek-V4.1 eager U2 supports only P2pHcclAFDConnector "
+                    "or WindowAFDConnector"
                 )
             if int(getattr(parallel_config, "num_ubatches", 1)) != 2:
                 raise RuntimeError(
                     "DeepSeek-V4.1 eager U2 requires exactly two ubatches"
                 )
-        if getattr(vllm_config, "speculative_config", None) is not None:
+        speculative_config = getattr(vllm_config, "speculative_config", None)
+        uses_dspark = bool(
+            speculative_config is not None and is_dspark_config(vllm_config)
+        )
+        if uses_dspark:
+            if afd_config.connector != "P2pHcclAFDConnector":
+                raise RuntimeError(
+                    "DeepSeek-V4.1 DSpark AFD supports only P2pHcclAFDConnector"
+                )
+            if afd_config.role != "attention":
+                raise RuntimeError(
+                    "DeepSeek-V4.1 DSpark speculative execution belongs only to "
+                    "the Attention service"
+                )
+            if getattr(speculative_config, "method", None) != "mtp":
+                raise RuntimeError(
+                    "DeepSeek-V4.1 DSpark uses vLLM's mtp speculative method"
+                )
+            draft_config = getattr(speculative_config, "draft_model_config", None)
+            draft_hf_config = getattr(draft_config, "hf_config", None)
+            if draft_hf_config is None:
+                draft_hf_config = getattr(draft_config, "hf_text_config", None)
+            target_layers = tuple(
+                getattr(draft_hf_config, "dspark_target_layer_ids", ()) or ()
+            )
+            if not target_layers:
+                raise RuntimeError(
+                    "DeepSeek-V4.1 DSpark requires dspark_target_layer_ids"
+                )
+            block_size = int(getattr(draft_hf_config, "dspark_block_size", 0))
+            num_speculative_tokens = int(
+                getattr(speculative_config, "num_speculative_tokens", 0)
+            )
+            if num_speculative_tokens != block_size:
+                raise RuntimeError(
+                    "DeepSeek-V4.1 DSpark requires num_speculative_tokens to "
+                    "match dspark_block_size: "
+                    f"{num_speculative_tokens} != {block_size}"
+                )
+            if not bool(getattr(speculative_config, "enforce_eager", False)):
+                raise RuntimeError(
+                    "DeepSeek-V4.1 DSpark requires draft enforce_eager=true"
+                )
+        elif speculative_config is not None:
             raise RuntimeError(
                 "DeepSeek-V4.1 AFD MTP/DSpark support is pending a role-aware "
                 "draft adapter"
             )
         # ### PATCH END
-
-    from vllm_ascend.utils import is_dspark_config
 
     supported_connectors = {
         "CAMP2pAFDConnector",

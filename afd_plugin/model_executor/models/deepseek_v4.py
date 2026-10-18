@@ -14,7 +14,6 @@ from vllm.config import VllmConfig
 from vllm.forward_context import get_forward_context, override_forward_context
 from vllm_ascend.models import deepseek_v4 as native
 from vllm_ascend.models import deepseek_v4_mtp as native_mtp
-from vllm_ascend.utils import is_dspark_config
 
 from afd_plugin.config import parse_afd_config
 from afd_plugin.connectors import AFDF2ATransferPayload
@@ -27,6 +26,7 @@ from afd_plugin.model_executor.models.deepseek_v2 import (
     AFDRemoteFFNTransfer,
     RemoteFFNProxy,
 )
+from afd_plugin.model_executor.models.model_utils import is_dspark_config
 
 _ATTENTION_ROLE = frozenset(("attention",))
 _FFN_ROLE = frozenset(("ffn",))

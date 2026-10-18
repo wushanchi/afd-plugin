@@ -78,9 +78,22 @@ def create_ascend_forward_context(
     dp_world_size = get_dp_group().world_size
 
     new_forward_context.moe_comm_type = cur_forward_context.moe_comm_type
-    new_forward_context.moe_comm_method = get_moe_comm_method(
-        new_forward_context.moe_comm_type
+    model_comm_methods = getattr(
+        cur_forward_context.model_instance,
+        "moe_comm_methods",
+        None,
     )
+    if (
+        model_comm_methods is not None
+        and new_forward_context.moe_comm_type in model_comm_methods
+    ):
+        new_forward_context.moe_comm_method = model_comm_methods[
+            new_forward_context.moe_comm_type
+        ]
+    else:
+        new_forward_context.moe_comm_method = get_moe_comm_method(
+            new_forward_context.moe_comm_type
+        )
     new_forward_context.in_profile_run = cur_forward_context.in_profile_run
     new_forward_context.capturing = (
         mla_graph_params is not None or cur_forward_context.capturing

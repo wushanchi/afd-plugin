@@ -42,7 +42,6 @@ import torch.distributed as dist
 import torch.distributed.distributed_c10d as c10d
 from torch.distributed.distributed_c10d import ProcessGroup
 from vllm.forward_context import DPMetadata, get_forward_context
-from vllm_ascend.utils import is_dspark_config
 
 from afd_plugin.config import AFDConfig
 from afd_plugin.connectors.base import (
@@ -61,7 +60,10 @@ from afd_plugin.connectors.metadata import (
     send_control_payload,
 )
 from afd_plugin.distributed import build_rank_mapping, init_afd_process_group
-from afd_plugin.model_executor.models.model_utils import architecture_requires_input_ids
+from afd_plugin.model_executor.models.model_utils import (
+    architecture_requires_input_ids,
+    is_dspark_config,
+)
 from afd_plugin.v1.worker.dbo import maybe_apply_dbo_yield
 
 if TYPE_CHECKING:

@@ -56,6 +56,45 @@ def test_role_weight_iterator_is_one_shot_and_filters_layer_count():
     assert weights.consumed
 
 
+def test_window_weight_iterator_separates_shared_and_routed_experts():
+    weights = [
+        ("model.layers.0.mlp.gate.weight", object()),
+        ("model.layers.0.mlp.experts.7.w1.weight", object()),
+        ("model.layers.0.mlp.shared_experts.gate_proj.weight", object()),
+    ]
+
+    attention = list(
+        _iter_role_weights(
+            weights,
+            role="attention",
+            num_hidden_layers=40,
+            compute_gate_on_attention=True,
+        )
+    )
+    shared = list(
+        _iter_role_weights(
+            weights,
+            role="ffn",
+            num_hidden_layers=40,
+            window_ffn_kind="shared",
+        )
+    )
+    routed = list(
+        _iter_role_weights(
+            weights,
+            role="ffn",
+            num_hidden_layers=40,
+            window_ffn_kind="routed",
+        )
+    )
+
+    assert [name for name, _ in attention] == ["model.layers.0.mlp.gate.weight"]
+    assert [name for name, _ in shared] == [
+        "model.layers.0.mlp.shared_experts.gate_proj.weight"
+    ]
+    assert [name for name, _ in routed] == ["model.layers.0.mlp.experts.7.w1.weight"]
+
+
 def test_v41_causal_lm_exposes_layer_major_u2_hook():
     """The NPU ubatch wrapper is installed around the CausalLM object."""
 
