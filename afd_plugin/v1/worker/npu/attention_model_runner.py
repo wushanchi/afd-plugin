@@ -275,7 +275,15 @@ class AFDNPUAttentionModelRunner(NPUModelRunner):
             | None
         ) = None
         self._afd_logged_metadata_stage_counts: set[tuple[int, bool, bool]] = set()
-        self.prof = create_afd_npu_profiler("attention", role_rank=rank)
+        # ### PATCH START: role-local profiler rank
+        # The profiler filter is role-local.  Using the connector rank keeps
+        # Window/P2P topologies correct when FFN and Attention use different
+        # global rank ranges.
+        self.prof = create_afd_npu_profiler(
+            "attention",
+            role_rank=int(self.connector.role_rank),
+        )
+        # ### PATCH END: role-local profiler rank
 
     @staticmethod
     def parse_config(vllm_config: VllmConfig) -> AFDConfig:
@@ -372,10 +380,13 @@ class AFDNPUAttentionModelRunner(NPUModelRunner):
         scheduler_output: SchedulerOutput,
         intermediate_tensors: IntermediateTensors | None = None,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
-        step_afd_npu_profiler(self.prof)
         # ### PATCH START: AFD live execution scope
         self._afd_live_execution = True
         try:
+            # Startup warmup and graph capture call the dummy path instead of
+            # this method.  Count only real engine executions so the first
+            # profiler step has the same serving boundary as the AFD metadata.
+            step_afd_npu_profiler(self.prof)
             result = super().execute_model(scheduler_output, intermediate_tensors)
         finally:
             self._afd_live_execution = False

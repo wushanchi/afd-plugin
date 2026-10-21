@@ -21,6 +21,7 @@ _ENV_NAMES = (
     "AFD_NPU_ATTENTION_PROFILER_SKIP_FIRST",
     "AFD_NPU_ATTENTION_PROFILER_DIR",
     "AFD_NPU_ATTENTION_PROFILER_WITH_STACK",
+    "AFD_NPU_ATTENTION_PROFILER_RANKS",
     "AFD_NPU_FFN_PROFILER_ENABLE",
     "AFD_NPU_FFN_PROFILER_WAIT",
     "AFD_NPU_FFN_PROFILER_WARMUP",
@@ -29,6 +30,7 @@ _ENV_NAMES = (
     "AFD_NPU_FFN_PROFILER_SKIP_FIRST",
     "AFD_NPU_FFN_PROFILER_DIR",
     "AFD_NPU_FFN_PROFILER_WITH_STACK",
+    "AFD_NPU_FFN_PROFILER_RANKS",
     "VLLM_ASCEND_MODEL_RUNNER_PROFILER_ENABLE",
     "VLLM_ASCEND_FFN_PROFILER_ENABLE",
     "VLLM_TORCH_PROFILER_DIR",
@@ -53,10 +55,12 @@ def test_npu_profiler_defaults_are_disabled():
     assert attention.skip_first == 1500
     assert attention.trace_dir == "/tmp/profile/attn"
     assert attention.with_stack is False
+    assert attention.ranks is None
     assert ffn.enabled is False
     assert ffn.active == 20
     assert ffn.trace_dir == "/tmp/profile/ffn"
     assert ffn.with_stack is False
+    assert ffn.ranks is None
 
 
 def test_npu_profiler_uses_only_plugin_owned_enable_env(monkeypatch):
@@ -110,6 +114,11 @@ def test_create_npu_profiler_uses_configured_schedule(monkeypatch):
     assert profiler_module.profile_kwargs["with_stack"] is True
     assert profiler_module.profile_kwargs["with_modules"] is True
     assert profiler_module.trace_dir == "/tmp/afd-ffn"
+    assert profiler_module.experimental_config == {
+        "export_type": "text",
+        "profiler_level": "level1",
+        "aic_metrics": "pipe_utilization",
+    }
 
 
 def test_step_npu_profiler_ignores_disabled_profiler():
@@ -128,6 +137,18 @@ def test_stop_npu_profiler_ignores_disabled_profiler():
     stop_afd_npu_profiler(profiler)
 
     assert profiler.stopped is True
+    assert profiler.steps == 1
+
+
+def test_npu_profiler_rejects_invalid_schedule(monkeypatch):
+    monkeypatch.setenv("AFD_NPU_FFN_PROFILER_ACTIVE", "0")
+    with pytest.raises(ValueError, match="ACTIVE"):
+        afd_npu_profiler_config("ffn")
+
+    monkeypatch.setenv("AFD_NPU_FFN_PROFILER_ACTIVE", "1")
+    monkeypatch.setenv("AFD_NPU_FFN_PROFILER_WAIT", "-1")
+    with pytest.raises(ValueError, match="WAIT"):
+        afd_npu_profiler_config("ffn")
 
 
 class _StepProfiler:
@@ -151,9 +172,11 @@ class _FakeTorchNPUProfiler:
         Text = "text"
 
     class ProfilerLevel:
+        Level1 = "level1"
         Level2 = "level2"
 
     class AiCMetrics:
+        PipeUtilization = "pipe_utilization"
         AiCoreNone = "aicore_none"
 
     class ProfilerActivity:
@@ -165,9 +188,11 @@ class _FakeTorchNPUProfiler:
         self.schedule_kwargs = None
         self.profile_kwargs = None
         self.trace_dir = None
+        self.experimental_config = None
         self._ExperimentalConfig = self._experimental_config
 
     def _experimental_config(self, **kwargs):
+        self.experimental_config = kwargs
         return kwargs
 
     def schedule(self, **kwargs):
