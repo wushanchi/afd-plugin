@@ -119,7 +119,14 @@ class AFDNPUFFNModelRunner(NPUModelRunner):
         self.graph_pool = (
             current_platform.get_global_graph_pool() if self.use_aclgraph else None
         )
-        self.prof = create_afd_npu_profiler("ffn", role_rank=rank)
+        # ### PATCH START: role-local profiler rank
+        # The profiler filter is role-local; global vLLM ranks are not stable
+        # across the FFN-first/Attention-second AFD topology.
+        self.prof = create_afd_npu_profiler(
+            "ffn",
+            role_rank=int(self.connector.role_rank),
+        )
+        # ### PATCH END: role-local profiler rank
         self._is_shutdown = False
         self._ffn_input_ids_cache: dict[int, torch.Tensor] = {}
         self.mtp_ffn_model: torch.nn.Module | None = None
@@ -469,7 +476,6 @@ class AFDNPUFFNModelRunner(NPUModelRunner):
         input_ids_by_stage: dict[int, torch.Tensor] | None = None,
         connector_state_prepared: bool = False,
     ) -> None:
-        step_afd_npu_profiler(self.prof)
         if dp_metadata_list is None:
             raise RuntimeError("AFD NPU FFN is connector-driven")
         if not connector_state_prepared:
@@ -496,6 +502,10 @@ class AFDNPUFFNModelRunner(NPUModelRunner):
                 is_warmup=is_warmup,
                 connector_state_prepared=True,
             )
+        # Warmup/capture are startup work and are deliberately excluded from
+        # the serving schedule.  FFN and Attention therefore enter ACTIVE on
+        # their first live transaction rather than on unrelated graph setup.
+        step_afd_npu_profiler(self.prof)
         if input_ids_by_stage is None and run_mode is AFDGraphRunMode.REPLAY:
             input_ids_by_stage = self._receive_input_ids_before_model(dp_metadata_list)
         if run_mode is AFDGraphRunMode.REPLAY:
