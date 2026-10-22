@@ -383,15 +383,15 @@ class AFDNPUAttentionModelRunner(NPUModelRunner):
         # ### PATCH START: AFD live execution scope
         self._afd_live_execution = True
         try:
-            # Startup warmup and graph capture call the dummy path instead of
-            # this method.  Count only real engine executions so the first
-            # profiler step has the same serving boundary as the AFD metadata.
-            step_afd_npu_profiler(self.prof)
             result = super().execute_model(scheduler_output, intermediate_tensors)
+            # Advance after the real engine execution.  This prevents a
+            # transaction that is still waiting on AFD transfers from being
+            # counted as an empty startup step.
+            step_afd_npu_profiler(self.prof)
+            return result
         finally:
             self._afd_live_execution = False
         # ### PATCH END: AFD live execution scope
-        return result
 
     # Upstream source: vllm-ascend commit 80d8c194f,
     # NPUModelRunner._model_forward.

@@ -264,11 +264,13 @@ class AFDNPUFFNModelRunner(NPUModelRunner):
                 "AFD connector",
             )
         if getattr(self.connector, "is_window_connector", False):
-            step_afd_npu_profiler(self.prof)
             self._window_ffn_forward()
+            # Count a completed Window transaction. Stepping before the
+            # blocking receive advances the schedule while the FFN is idle.
+            step_afd_npu_profiler(self.prof)
             return None
-        step_afd_npu_profiler(self.prof)
         self._ffn_forward_connector_driven()
+        step_afd_npu_profiler(self.prof)
         return None
 
     def _window_ffn_forward(self) -> None:
@@ -504,9 +506,7 @@ class AFDNPUFFNModelRunner(NPUModelRunner):
                 connector_state_prepared=True,
             )
         # Warmup/capture are startup work and are deliberately excluded from
-        # the serving schedule.  FFN and Attention therefore enter ACTIVE on
-        # their first live transaction rather than on unrelated graph setup.
-        step_afd_npu_profiler(self.prof)
+        # the serving schedule. FFN enters ACTIVE only after a live transaction.
         if input_ids_by_stage is None and run_mode is AFDGraphRunMode.REPLAY:
             input_ids_by_stage = self._receive_input_ids_before_model(dp_metadata_list)
         if run_mode is AFDGraphRunMode.REPLAY:
@@ -517,8 +517,10 @@ class AFDNPUFFNModelRunner(NPUModelRunner):
             )
             graph_info["graph"].replay()
             if not self._recv_mtp_phase_ready():
+                step_afd_npu_profiler(self.prof)
                 return None
             self._execute_mtp_after_target(dp_metadata_list)
+            step_afd_npu_profiler(self.prof)
             return None
 
         self._ffn_forward(
@@ -527,8 +529,10 @@ class AFDNPUFFNModelRunner(NPUModelRunner):
             update_connector_state=False,
         )
         if not self._recv_mtp_phase_ready():
+            step_afd_npu_profiler(self.prof)
             return None
         self._execute_mtp_after_target(dp_metadata_list)
+        step_afd_npu_profiler(self.prof)
         return None
 
     def _execute_mtp_after_target(
