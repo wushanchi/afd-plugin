@@ -13,7 +13,7 @@ Use the symmetric environment variable prefixes
 | --- | ---: | --- |
 | `ENABLE` | `0` | Create and start the profiler |
 | `DIR` | `/tmp/profile/attn` or `/tmp/profile/ffn` | TensorBoard trace directory |
-| `RANKS` | `all` | `all` or a comma-separated list of role-local ranks |
+| `RANKS` | `all` | `all` or a comma-separated list of vLLM world ranks |
 | `WAIT` | `2` | Steps skipped before warmup |
 | `WARMUP` | `1` | Warmup steps |
 | `ACTIVE` | `10` / `20` | Recorded steps for Attention / FFN |
@@ -21,10 +21,10 @@ Use the symmetric environment variable prefixes
 | `SKIP_FIRST` | `1500` | Steps skipped before the first cycle |
 | `WITH_STACK` | `0` | Include Python stack and module metadata |
 
-Unset `RANKS` means every worker in that role is collected. A rank list is
-role-local: rank 0 on Attention is distinct from rank 0 on FFN. The runner
-passes `connector.role_rank`, so it remains correct for FFN-first Window and
-P2P topologies.
+Unset `RANKS` means every worker in that role is collected. A rank list uses
+the vLLM world rank passed to the runner. Use `all` when collecting both sides
+of an FFN-first Window/P2P topology, because the two roles can occupy
+different world-rank ranges.
 
 The experimental NPU configuration uses profiler Level 1 with
 `AiCMetrics.PipeUtilization`, in addition to CPU/NPU activities and recorded

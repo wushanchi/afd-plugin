@@ -275,10 +275,14 @@ real CAM dispatch/combine operator namespace. Its loader verifies
 
 Attention and FFN use independent optional `torch_npu.profiler` instances,
 controlled by `AFD_NPU_ATTENTION_PROFILER_*` and
-`AFD_NPU_FFN_PROFILER_*`. The helper configures CPU/NPU activities, Level 2
-experimental output, role-specific defaults, optional stacks/modules, and a
-TensorBoard trace handler. Runners step the profiler on execution and stop it
-during shutdown.
+`AFD_NPU_FFN_PROFILER_*`. The helper configures CPU/NPU activities, Level 1
+`PipeUtilization` metrics, role-specific defaults, optional stacks/modules,
+and a TensorBoard trace handler. `RANKS` filters the vLLM world rank and
+defaults to all ranks. Runners have independent step counters: Attention
+steps on live engine executions, while FFN steps on connector transactions.
+Startup warmup and graph capture are excluded where the control-plane path
+exposes those states; the Window connector remains transaction-driven. A
+final step is issued before shutdown to flush the active schedule.
 
 ## Tested runtime matrix
 

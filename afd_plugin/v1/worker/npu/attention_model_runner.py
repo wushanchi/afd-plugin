@@ -275,15 +275,15 @@ class AFDNPUAttentionModelRunner(NPUModelRunner):
             | None
         ) = None
         self._afd_logged_metadata_stage_counts: set[tuple[int, bool, bool]] = set()
-        # ### PATCH START: role-local profiler rank
-        # The profiler filter is role-local.  Using the connector rank keeps
-        # Window/P2P topologies correct when FFN and Attention use different
-        # global rank ranges.
+        # ### PATCH START: world-rank profiler filter
+        # Preserve the profiler environment contract: RANKS filters the vLLM
+        # world rank, while the default is all ranks.  Connector role ranks
+        # are topology-local and must not reinterpret an existing RANKS list.
         self.prof = create_afd_npu_profiler(
             "attention",
-            role_rank=int(self.connector.role_rank),
+            role_rank=rank,
         )
-        # ### PATCH END: role-local profiler rank
+        # ### PATCH END: world-rank profiler filter
 
     @staticmethod
     def parse_config(vllm_config: VllmConfig) -> AFDConfig:
