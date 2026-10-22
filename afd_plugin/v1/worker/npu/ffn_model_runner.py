@@ -119,14 +119,15 @@ class AFDNPUFFNModelRunner(NPUModelRunner):
         self.graph_pool = (
             current_platform.get_global_graph_pool() if self.use_aclgraph else None
         )
-        # ### PATCH START: role-local profiler rank
-        # The profiler filter is role-local; global vLLM ranks are not stable
-        # across the FFN-first/Attention-second AFD topology.
+        # ### PATCH START: world-rank profiler filter
+        # Preserve the profiler environment contract: RANKS filters the vLLM
+        # world rank, while the default is all ranks.  Connector role ranks
+        # are topology-local and must not reinterpret an existing RANKS list.
         self.prof = create_afd_npu_profiler(
             "ffn",
-            role_rank=int(self.connector.role_rank),
+            role_rank=rank,
         )
-        # ### PATCH END: role-local profiler rank
+        # ### PATCH END: world-rank profiler filter
         self._is_shutdown = False
         self._ffn_input_ids_cache: dict[int, torch.Tensor] = {}
         self.mtp_ffn_model: torch.nn.Module | None = None
