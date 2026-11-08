@@ -8,10 +8,13 @@ from afd_plugin.connectors.npu.camp2p import (
     CAMP2PTransferState,
     build_camp2p_topology,
 )
+from afd_plugin.connectors.npu.window import WindowAFDConnector, WindowAFDExtraInfo
 
 __all__ = [
     "CAMP2pAFDConnector",
     "CAMP2PExtraInfo",
     "CAMP2PTransferState",
     "build_camp2p_topology",
+    "WindowAFDConnector",
+    "WindowAFDExtraInfo",
 ]

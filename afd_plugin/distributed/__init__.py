@@ -4,7 +4,11 @@
 
 from afd_plugin.distributed.topology import (
     AFDRankMapping,
+    AFDWindowExpertLayout,
+    AFDWindowRankMapping,
     build_rank_mapping,
+    build_window_expert_layout,
+    build_window_rank_mapping,
     resolve_role_rank,
     subgroup_attention_block,
     topology_from_config,
@@ -28,6 +32,10 @@ def __getattr__(name: str):
 
 __all__ = [
     "AFDRankMapping",
+    "AFDWindowExpertLayout",
+    "AFDWindowRankMapping",
+    "build_window_expert_layout",
+    "build_window_rank_mapping",
     "DefaultProcessGroupSwitcher",
     "build_rank_mapping",
     "create_hccl_process_group_options",

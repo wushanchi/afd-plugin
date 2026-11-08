@@ -12,6 +12,7 @@ pytest.importorskip("vllm")
 from afd_plugin.compat.npu.feature_validation import (
     _fail_if_unsupported_dsv4_async_features,
     _fail_if_unsupported_dsv4_connector,
+    _is_dsv41_target,
 )
 from afd_plugin.connectors.npu.async_cam import AFDAsyncExtraInfo
 
@@ -84,3 +85,27 @@ def test_dsv4_async_accepts_target_baseline() -> None:
             attn_ranks_per_dp=2,
         ),
     )
+
+
+@pytest.mark.parametrize(
+    "model_type, architectures, expected",
+    [
+        ("deepseek_v41", (), True),
+        ("deepseek_v4", (), False),
+        (None, ("DeepseekV41ForCausalLM",), True),
+    ],
+)
+def test_dsv41_target_detection_is_separate_from_dsv4(
+    model_type: str | None,
+    architectures: tuple[str, ...],
+    expected: bool,
+) -> None:
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(
+                model_type=model_type,
+                architectures=architectures,
+            )
+        )
+    )
+    assert _is_dsv41_target(config) is expected

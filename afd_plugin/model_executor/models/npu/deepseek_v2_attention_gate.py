@@ -162,13 +162,42 @@ def compute_attention_gate_moe_ffn(
     apply the factor twice.
     """
 
+    # Window reserves one FFN rank for the shared MLP. That role deliberately
+    # has no routed ``experts`` runner, so handle it before touching the
+    # routed-expert ABI below. The Window operator already selected the role
+    # and supplied the corresponding rows; the shared MLP consumes them
+    # directly and returns through the same F2A payload.
+    experts = getattr(layer.mlp, "experts", None)
+    if experts is None:
+        shared_experts = getattr(layer.mlp, "shared_experts", None)
+        if shared_experts is None:
+            raise RuntimeError("Window shared FFN rank has no shared expert module")
+        if hidden_states.shape[0] == 0:
+            shared_output = hidden_states.new_empty(
+                (0, int(hidden_states.shape[-1])),
+                dtype=torch.bfloat16,
+            )
+        elif hidden_states.dtype == torch.int8:
+            shared_output = _compute_w8a8_shared_experts_from_int8(
+                shared_experts,
+                hidden_states,
+                dynamic_scales,
+                swiglu_limit=getattr(layer.mlp, "swiglu_limit", None),
+                output_dtype=torch.bfloat16,
+            )
+        else:
+            shared_output = shared_experts(hidden_states)
+        return AFDF2ATransferPayload(
+            routed_output=shared_output,
+            shared_output=None,
+        )
+
     from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights
     from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
     from vllm_ascend.ops.fused_moe.dataclass.moe_quant import MoEQuantParams
     from vllm_ascend.ops.fused_moe.moe_mlp import apply_moe_mlp
     from vllm_ascend.quantization.quant_type import QuantType
 
-    experts = layer.mlp.experts
     moe_config = experts.moe_config
     routed_experts = experts.routed_experts
     quant_type = experts.quant_type

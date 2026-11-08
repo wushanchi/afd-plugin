@@ -52,6 +52,10 @@ def fail_if_unsupported_npu_afd_features(
     if is_dsv4:
         _fail_if_unsupported_dsv4_connector(afd_config)
 
+    if _is_dsv41_target(vllm_config) and afd_config.connector == "WindowAFDConnector":
+        _fail_if_unsupported_dsv41_window(vllm_config, afd_config, extra_info)
+        return
+
     if afd_config.connector == AFD_ASYNC_CONNECTOR:
         _fail_if_unsupported_npu_afd_async_features(
             vllm_config,
@@ -109,6 +113,8 @@ def fail_if_unsupported_npu_afd_features(
 
 def _is_dsv4_target(vllm_config: VllmConfig) -> bool:
     """Return whether the target model is DeepSeek V4."""
+    if _is_dsv41_target(vllm_config):
+        return False
     model_config = vllm_config.model_config
     hf_config = getattr(model_config, "hf_config", None)
     if hf_config is None:
@@ -119,6 +125,57 @@ def _is_dsv4_target(vllm_config: VllmConfig) -> bool:
         return True
     architectures = getattr(hf_config, "architectures", ()) or ()
     return any("DeepseekV4" in str(architecture) for architecture in architectures)
+
+
+def _is_dsv41_target(vllm_config: VllmConfig) -> bool:
+    """Return whether the target model is DeepSeek V4.1 Flash."""
+    model_config = vllm_config.model_config
+    hf_config = getattr(model_config, "hf_config", None)
+    if hf_config is None:
+        hf_config = getattr(model_config, "hf_text_config", None)
+    if hf_config is None:
+        return False
+    if getattr(hf_config, "model_type", None) == "deepseek_v41":
+        return True
+    architectures = getattr(hf_config, "architectures", ()) or ()
+    return any("DeepseekV41" in str(architecture) for architecture in architectures)
+
+
+def _fail_if_unsupported_dsv41_window(
+    vllm_config: VllmConfig,
+    afd_config: AFDConfig,
+    extra_info: ConnectorExtraInfo,
+) -> None:
+    """Keep U1 deliberately eager and one-slot until the U2 ABI is ready."""
+    from afd_plugin.connectors.npu.window import WindowAFDExtraInfo
+
+    if not isinstance(extra_info, WindowAFDExtraInfo):
+        raise TypeError("WindowAFDConnector requires WindowAFDExtraInfo")
+    if extra_info.micro_batch_num != 1:
+        raise RuntimeError("DSV4.1 Window U1 requires micro_batch_num=1")
+    if not afd_config.compute_gate_on_attention:
+        raise RuntimeError("DSV4.1 Window U1 requires compute_gate_on_attention=true")
+    if bool(
+        (getattr(vllm_config, "additional_config", {}) or {}).get(
+            "mix_placement",
+            False,
+        )
+    ):
+        raise RuntimeError(
+            "DSV4.1 Window U1 requires mix_placement=false for a dedicated "
+            "shared-expert rank"
+        )
+    if vllm_config.parallel_config.enable_eplb:
+        raise RuntimeError("DSV4.1 Window U1 does not support EPLB")
+    if not bool(vllm_config.model_config.enforce_eager):
+        raise RuntimeError("DSV4.1 Window U1 requires enforce_eager=true")
+    parallel_config = vllm_config.parallel_config
+    if (
+        parallel_config.pipeline_parallel_size != 1
+        or parallel_config.prefill_context_parallel_size != 1
+        or parallel_config.decode_context_parallel_size != 1
+    ):
+        raise RuntimeError("DSV4.1 Window U1 does not support PP or CP")
 
 
 def _fail_if_unsupported_dsv4_async_features(

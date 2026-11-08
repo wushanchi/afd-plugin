@@ -54,6 +54,9 @@ def test_deepseek_afd_model_registration_paths_are_lazy_strings():
         if importlib.util.find_spec("torch_npu") is not None
         else "afd_plugin.model_executor.models.deepseek_v4:AFDDeepseekV4ForCausalLM"
     )
+    assert registrations["DeepseekV41ForCausalLM"] == (
+        "afd_plugin.model_executor.models.npu.deepseek_v41:AFDDeepseekV41ForCausalLM"
+    )
 
 
 def test_qwen3_moe_afd_model_registration_path_is_lazy_string():
@@ -91,6 +94,15 @@ def test_merged_model_registrations_include_both_qwen_families():
     assert registrations["Qwen3MoeForCausalLM"] == (
         "afd_plugin.model_executor.models.qwen3_moe:AFDQwen3MoeForCausalLM"
     )
+
+
+def test_window_connector_is_registered_lazily():
+    pytest.importorskip("torch")
+    pytest.importorskip("vllm")
+    from afd_plugin.connectors import AFDConnectorFactory
+
+    connector = AFDConnectorFactory.get_connector_class("WindowAFDConnector")
+    assert connector.__name__ == "WindowAFDConnector"
 
 
 def test_merged_model_registrations_are_immutable():

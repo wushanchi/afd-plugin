@@ -146,6 +146,52 @@ class AFDNPUFFNModelRunner:
     def initialize_afd_connector(self) -> None:
         self.connector.init_afd_connector()
 
+    def execute_connector_driven_step(self) -> bool:
+        """Execute one eager Window step without the DP control plane."""
+        if not getattr(self.connector, "is_window_connector", False):
+            raise RuntimeError("connector-driven execution is only for Window U1")
+        self._window_ffn_forward()
+        return True
+
+    def _window_ffn_forward(self) -> None:
+        if self.model is None:
+            raise RuntimeError("AFD NPU FFN model has not been loaded")
+        for layer_idx in _ffn_layer_indices(self):
+            payload = self.connector.recv_attn_output(
+                ubatch_idx=0,
+                layer_idx=int(layer_idx),
+                max_num_tokens=self.max_num_tokens,
+            )
+            states = payload.context.states
+            if states is None:
+                raise RuntimeError("Window U1 batching returned no transfer state")
+            hidden_states = payload.hidden_states
+            num_tokens = int(hidden_states.shape[0])
+            metadata = payload.context.metadata
+            afd_metadata = AFDForwardContextMetadata(
+                tokens_start_loc=[0],
+                requests_start_loc=[0],
+                stage_idx=0,
+                connector=self.connector,
+                tokens_lens=[num_tokens],
+                num_stages=1,
+                tokens_unpadded_lens=[num_tokens],
+            )
+            with ascend_forward_context(
+                vllm_config=self.vllm_config,
+                afd_metadata=afd_metadata,
+                model_instance=self.model,
+                num_tokens=num_tokens,
+            ) as forward_context:
+                forward_context.dp_metadata = None
+                forward_context.additional_kwargs["afd_metadata"] = metadata
+                _set_moe_layer_index(forward_context, int(layer_idx))
+                rank_output = self.model.compute_ffn_output(
+                    hidden_states=hidden_states,
+                    layer_idx=int(layer_idx),
+                )
+            _send_ffn_output(self.connector, rank_output, payload.context, stage_idx=0)
+
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         return {}
 

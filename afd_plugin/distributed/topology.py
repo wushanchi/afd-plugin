@@ -43,6 +43,78 @@ class AFDRankMapping:
         return self.world_rank < self.ffn_size or self.is_attention_top_min_size_rank
 
 
+@dataclass(frozen=True, slots=True)
+class AFDWindowRankMapping:
+    """FFN-first global rank map used by the one-slot Window data path."""
+
+    world_rank: int
+    attention_size: int
+    ffn_size: int
+    peer_ranks: tuple[int, ...]
+
+    @property
+    def world_size(self) -> int:
+        return self.attention_size + self.ffn_size
+
+
+@dataclass(frozen=True, slots=True)
+class AFDWindowExpertLayout:
+    """Deterministic shared-first expert placement for Window U1."""
+
+    kind: str
+    local_expert_start: int
+    local_expert_count: int
+
+    @property
+    def is_shared(self) -> bool:
+        return self.kind == "shared"
+
+
+def build_window_expert_layout(
+    *, routed_expert_num: int, ffn_size: int, ffn_rank: int
+) -> AFDWindowExpertLayout:
+    if routed_expert_num <= 0 or ffn_size < 2:
+        raise ValueError("Window requires routed experts and one shared FFN rank")
+    if not 0 <= ffn_rank < ffn_size:
+        raise ValueError(f"FFN rank {ffn_rank} is outside size {ffn_size}")
+    routed_rank_num = ffn_size - 1
+    if routed_rank_num > routed_expert_num:
+        raise ValueError("Window FFN ranks exceed routed expert count")
+    if ffn_rank == 0:
+        return AFDWindowExpertLayout("shared", routed_expert_num, 1)
+    routed_rank = ffn_rank - 1
+    base, extra = divmod(routed_expert_num, routed_rank_num)
+    return AFDWindowExpertLayout(
+        "routed",
+        routed_rank * base + min(routed_rank, extra),
+        base + int(routed_rank < extra),
+    )
+
+
+def build_window_rank_mapping(
+    config: AFDConfig, role_rank: int
+) -> AFDWindowRankMapping:
+    attention_size, ffn_size = topology_from_config(config)
+    if attention_size <= 0 or ffn_size <= 0:
+        raise ValueError("Window requires positive attention and FFN rank counts")
+    if config.role == "ffn":
+        if role_rank >= ffn_size:
+            raise ValueError("FFN role rank is outside Window topology")
+        return AFDWindowRankMapping(
+            role_rank,
+            attention_size,
+            ffn_size,
+            tuple(range(ffn_size, ffn_size + attention_size)),
+        )
+    if config.role == "attention":
+        if role_rank >= attention_size:
+            raise ValueError("Attention role rank is outside Window topology")
+        return AFDWindowRankMapping(
+            ffn_size + role_rank, attention_size, ffn_size, tuple(range(ffn_size))
+        )
+    raise ValueError(f"unknown AFD role {config.role!r}")
+
+
 def topology_from_config(config: AFDConfig) -> tuple[int, int]:
     """Return ``(attention_size, ffn_size)`` for an AFD config."""
 
@@ -186,6 +258,10 @@ def build_rank_mapping(
 
 __all__ = [
     "AFDRankMapping",
+    "AFDWindowExpertLayout",
+    "AFDWindowRankMapping",
+    "build_window_expert_layout",
+    "build_window_rank_mapping",
     "build_rank_mapping",
     "resolve_role_rank",
     "topology_from_config",
