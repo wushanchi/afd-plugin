@@ -14,6 +14,10 @@ from afd_plugin.compat.npu.feature_validation import (
     _fail_if_unsupported_dsv4_connector,
     _is_dsv41_target,
 )
+from afd_plugin.config import (
+    WINDOW_CONNECTOR,
+    afd_config_from_mapping,
+)
 from afd_plugin.connectors.npu.async_cam import AFDAsyncExtraInfo
 
 
@@ -109,3 +113,20 @@ def test_dsv41_target_detection_is_separate_from_dsv4(
         )
     )
     assert _is_dsv41_target(config) is expected
+
+
+def test_window_connector_is_a_valid_async_afd_config() -> None:
+    config = afd_config_from_mapping(
+        {
+            "connector": WINDOW_CONNECTOR,
+            "async": True,
+            "role": "attention",
+            "host": "127.0.0.1",
+            "port": 29761,
+            "num_attention_ranks": 6,
+            "num_ffn_ranks": 18,
+            "compute_gate_on_attention": True,
+        }
+    )
+    assert config.connector == WINDOW_CONNECTOR
+    assert config.async_dp is True

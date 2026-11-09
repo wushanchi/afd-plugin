@@ -155,6 +155,8 @@ def _fail_if_unsupported_dsv41_window(
         raise RuntimeError("DSV4.1 Window U1 requires micro_batch_num=1")
     if not afd_config.compute_gate_on_attention:
         raise RuntimeError("DSV4.1 Window U1 requires compute_gate_on_attention=true")
+    if not afd_config.async_dp:
+        raise RuntimeError("DSV4.1 Window U1 requires async=true")
     if bool(
         (getattr(vllm_config, "additional_config", {}) or {}).get(
             "mix_placement",

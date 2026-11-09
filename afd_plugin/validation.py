@@ -13,6 +13,7 @@ from afd_plugin.config import (
     AFD_ASYNC_CONNECTOR,
     CAMP2P_CONNECTOR,
     DEEPEP_M2N_CONNECTORS,
+    WINDOW_CONNECTOR,
     AFDConfig,
     parse_afd_config,
 )
@@ -195,19 +196,21 @@ def validate_npu_model_runner_v2_config(
     afd_config = parse_afd_config(vllm_config, expected_role=expected_role)
     if device_type != "npu":
         raise RuntimeError("AFD NPU ModelRunnerV2 requires NPU")
-    if afd_config.connector == AFD_ASYNC_CONNECTOR:
+    if afd_config.connector in (AFD_ASYNC_CONNECTOR, WINDOW_CONNECTOR):
         if not afd_config.async_dp or not afd_config.compute_gate_on_attention:
             raise RuntimeError(
-                "AFD NPU ModelRunnerV2 Async CAM requires async DP and "
+                "AFD NPU ModelRunnerV2 asynchronous Window/CAM paths require "
+                "async DP and "
                 "compute_gate_on_attention=true",
             )
         if not vllm_config.model_config.enforce_eager:
-            if expected_role == "attention":
+            if expected_role == "attention" or afd_config.connector == WINDOW_CONNECTOR:
                 raise RuntimeError(
-                    "AFD NPU ModelRunnerV2 Async CAM requires eager execution "
-                    "on Attention"
+                    "AFD NPU ModelRunnerV2 Window/CAM path requires eager "
+                    "execution on this role"
                 )
-            requested_ffn_mode(vllm_config)
+            if afd_config.connector == AFD_ASYNC_CONNECTOR:
+                requested_ffn_mode(vllm_config)
     elif (
         afd_config.connector != CAMP2P_CONNECTOR or afd_config.compute_gate_on_attention
     ):
@@ -243,7 +246,7 @@ def validate_npu_model_runner_v2_config(
         raise RuntimeError("AFD ModelRunnerV2 requires static expert parallelism")
     if parallel.enable_dbo or parallel.use_ubatching:
         if (
-            afd_config.connector == AFD_ASYNC_CONNECTOR
+            afd_config.connector in (AFD_ASYNC_CONNECTOR, WINDOW_CONNECTOR)
             and not vllm_config.model_config.enforce_eager
         ):
             raise RuntimeError("AFD NPU ModelRunnerV2 DBO requires eager execution")
